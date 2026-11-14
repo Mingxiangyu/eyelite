@@ -31,11 +31,31 @@ $full = (Resolve-Path -LiteralPath $Path).Path
 $data = [System.IO.File]::ReadAllBytes($full)
 $info = Get-Item -LiteralPath $full
 
+# PE header TimeDateStamp: written by the compiler, survives copying and touching.
+# File mtime does not, so this is the better "when was it really built" signal.
+function Get-PeBuildTime {
+    param([byte[]] $D)
+    if ($D.Length -lt 0x40) { return $null }
+    $lfanew = [System.BitConverter]::ToInt32($D, 0x3C)
+    if ($lfanew -le 0 -or ($lfanew + 12) -ge $D.Length) { return $null }
+    if ($D[$lfanew] -ne 0x50 -or $D[$lfanew + 1] -ne 0x45) { return $null }
+    $ts = [System.BitConverter]::ToUInt32($D, $lfanew + 8)
+    if ($ts -eq 0) { return $null }
+    $epoch = [System.DateTime]::SpecifyKind([System.DateTime]::Parse("1970-01-01"), [System.DateTimeKind]::Utc)
+    return $epoch.AddSeconds($ts).ToLocalTime()
+}
+
 Write-Host ""
 Write-Host "EyeLite build probe"
 Write-Host "  file      : $full"
 Write-Host ("  size      : {0} bytes" -f $info.Length)
-Write-Host ("  timestamp : {0}" -f $info.LastWriteTime)
+Write-Host ("  mtime     : {0}  (can be altered by copying)" -f $info.LastWriteTime)
+$peTime = Get-PeBuildTime $data
+if ($null -ne $peTime) {
+    Write-Host ("  built     : {0}  (PE header, baked at compile time)" -f $peTime)
+} else {
+    Write-Host "  built     : (not a PE file, or no timestamp)"
+}
 try {
     $md5 = (Get-FileHash -LiteralPath $full -Algorithm MD5).Hash.ToLower()
     Write-Host "  md5       : $md5"
