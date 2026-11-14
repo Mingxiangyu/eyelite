@@ -30,6 +30,36 @@ namespace EyeLite
     // ================================================================
     internal static class Ui
     {
+        // ---- 跨线程投递（钩子回调里绝不做 UI）----
+        // 低级键盘钩子回调超过 LowLevelHooksTimeout（默认 300ms）会被系统静默摘钩，
+        // 现象是"之后既不吞也不跳过"且没有任何日志，现场极难复现。
+        // 所以钩子里只做标记 + Post，UI 工作全部回到消息循环执行。
+        public static System.Threading.SynchronizationContext Context;
+
+        /// <summary>把动作投递到 UI 线程；没有 Context 或投递失败时退化为同步执行（宁可慢，不能丢）。</summary>
+        public static void Post(Action action)
+        {
+            if (action == null) return;
+
+            System.Threading.SynchronizationContext ctx = Context;
+            if (ctx == null)
+            {
+                try { action(); }
+                catch { }
+                return;
+            }
+
+            try
+            {
+                ctx.Post(delegate { try { action(); } catch { } }, null);
+            }
+            catch
+            {
+                try { action(); }
+                catch { }
+            }
+        }
+
         // ---- 深色遮罩（主色 60% / 辅助 30% / 强调 10%）----
         public static readonly Color GradTop = Color.FromArgb(0x08, 0x0B, 0x10);      // #080B10
         public static readonly Color GradBottom = Color.FromArgb(0x10, 0x17, 0x20);   // #101720
@@ -511,6 +541,7 @@ namespace EyeLite
         private const int VK_F4 = 0x73;
         private const int VK_CONTROL = 0x11;
         private const int VK_MENU = 0x12;
+        private const int VK_SHIFT = 0x10;
 
         private delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -576,12 +607,87 @@ namespace EyeLite
             active = false;
             blockSystemKeys = false;
             blockAllKeys = false;
+
+            // 钩子不跑了，drain 状态必须一起归零。
+            // 否则 ExitApp / Dispose / OnTick 自愈里直接调 Uninstall() 之后 drainVk 仍留着，
+            // 下次休息一装钩子就进 ⓪ 分支把所有按键静默吞掉、且等不到那个 keyup。
+            //
+            // 注意：这里**只清钩子内部状态**，不要顺手把 OnSkipKey 也清了 ——
+            // 两者生命周期不同：OnSkipKey 是回调，由 EndRest 挂载/清理；
+            // 若在这里清，ExitApp/Dispose 等路径会提前抹掉还没走完的收尾逻辑。
+            drainVk = 0;
+            drainRearms = 0;
+            if (drainTimer != null) { try { drainTimer.Dispose(); } catch { } drainTimer = null; }
+
             if (hookHandle != IntPtr.Zero)
             {
                 try { UnhookWindowsHookEx(hookHandle); }
                 catch { }
                 hookHandle = IntPtr.Zero;
             }
+        }
+
+        // ------------------------------------------------------------
+        // 跳过后不能立刻卸钩子：用户的手可能还按着那个键，后续 key-repeat
+        // 会漏进下层文档（打出一串空格）。做法是记下这个键，继续吞它的
+        // down/up，直到收到 keyup 才真正卸载。
+        //
+        // 三重复位，任何一条先到都算收尾：
+        //   ① 收到该键的 keyup（正常路径，通常 200ms 内）
+        //   ② OnTick 每秒检查一次"键其实已经抬起了"（keyup 事件丢失时提前收尾）
+        //   ③ 2 秒定时器兜底，最多续期 3 次（合计 8 秒）后强制卸载
+        //      —— 防止某个键物理卡住时钩子永久挂着、整个键盘都不能用。
+        // ------------------------------------------------------------
+        private static int drainVk = 0;
+        private static int drainRearms = 0;
+        private static System.Threading.Timer drainTimer;
+
+        /// <summary>是否处于收尾期（OnTick 用它做双保险检查）。</summary>
+        public static bool IsDraining
+        {
+            get { return drainVk != 0; }
+        }
+
+        /// <summary>收尾键是否仍处于物理按下状态。</summary>
+        public static bool IsDrainKeyDown
+        {
+            get { return drainVk != 0 && Down(drainVk); }
+        }
+
+        /// <summary>强制立即卸载（OnTick 发现键已抬起时用）。</summary>
+        public static void ForceUninstall()
+        {
+            DoUninstall();
+        }
+
+        /// <summary>休息结束时调用：有键还按着就等它的 keyup，否则立刻卸。</summary>
+        public static void RequestUninstall()
+        {
+            if (drainVk == 0)
+            {
+                DoUninstall();
+                return;
+            }
+
+            if (drainTimer != null) { try { drainTimer.Dispose(); } catch { } }
+            drainTimer = new System.Threading.Timer(delegate
+            {
+                // 键还按着就续期，但最多 3 次（2s × 4 轮 = 8 秒）后强制卸载。
+                if (drainRearms < 3 && Down(drainVk))
+                {
+                    drainRearms++;
+                    RequestUninstall();
+                    return;
+                }
+                DoUninstall();
+            }, null, 2000, System.Threading.Timeout.Infinite);
+        }
+
+        private static void DoUninstall()
+        {
+            // 复位 drainVk / 释放 drainTimer 都在 Uninstall() 里统一做，
+            // 保证"直接卸载"与"drain 后卸载"两条路径的状态一致。
+            Uninstall();
         }
 
         private static bool Down(int vk)
@@ -601,27 +707,42 @@ namespace EyeLite
                 {
                     int vk = Marshal.ReadInt32(lParam);
 
+                    // ---- ⓪ drain 期：只吞不判，等到 keyup 或 2 秒超时才真正卸载 ----
+                    // 必须排在最前面：跳过之后用户可能还按着那个键，
+                    // 这里继续吞掉它的 repeat，避免漏进下层文档。
+                    if (drainVk != 0)
+                    {
+                        if (isUp && vk == drainVk) DoUninstall();
+                        return new IntPtr(1);
+                    }
+
                     // ---- ① 跳过键：必须排在"全吞"之前，且只处理按下 ----
                     // 顺序错了就会出现"严格模式下按 Esc 被吞掉、却什么都不发生"。
                     if (isDown)
                     {
-                        // Esc 与空格都必须"无修饰键"才算跳过。
-                        // 否则 Ctrl+Space（中文输入法中英切换）和 Alt+Space（窗口系统菜单）
-                        // 会在用户想干别的事时顺手把休息结束掉。
+                        // 跳过必须是「裸按键」：Shift / Ctrl / Alt 任一个按下都不算。
+                        // 原因：中文输入法里 Shift+Space 是切换全角/半角、Ctrl+Space 是切换中英文，
+                        // 这两个都是"切换动作"而非"打字动作"，用户休息时随手一按就会把休息结束掉，
+                        // 比 Alt+Space（窗口系统菜单）常见得多。
+                        // Esc 与空格用同一个判据 —— 对称的基准是"裸按键才表达意图"，
+                        // 而不是"两个键各自保留 Shift"。
                         //
-                        // 注：严格模式下这两个组合会被下面的"全吞"吞掉，也就是说
-                        // 休息期间输入法切换同样失效。这是刻意的（休息就该离开键盘），
-                        // 不是 bug，别"修"。
-                        bool plainEsc = (vk == VK_ESCAPE) && !Down(VK_CONTROL) && !Down(VK_MENU);
-                        bool plainSpace = (vk == VK_SPACE) && !Down(VK_CONTROL) && !Down(VK_MENU);
+                        // 注：严格模式下这三个组合会被下面的"全吞"吞掉，也就是说休息期间
+                        // 切输入法/切全角同样失效。这是刻意的（休息就该离开键盘），不是 bug，别"修"。
+                        bool noModifier = !Down(VK_CONTROL) && !Down(VK_MENU) && !Down(VK_SHIFT);
+                        bool plainEsc = (vk == VK_ESCAPE) && noModifier;
+                        bool plainSpace = (vk == VK_SPACE) && noModifier;
                         if (plainEsc || plainSpace)
                         {
                             Action cb = OnSkipKey;
                             if (cb != null)
                             {
-                                try { cb(); }
-                                catch { }
-                                return new IntPtr(1);   // 按下吞掉；抬起会在 ② 被吞
+                                drainVk = vk;    // 记下这个键，继续吞它的后续消息
+
+                                // 只投递、立刻返回：低级钩子回调超过 LowLevelHooksTimeout
+                                // 会被系统静默摘钩（之后既不吞也不跳过，且没有日志）。
+                                Ui.Post(cb);
+                                return new IntPtr(1);
                             }
                         }
                     }
@@ -935,14 +1056,17 @@ namespace EyeLite
 
             if (hasButtons)
             {
-                // 跳过 Sc(176) + 间距 Sc(16) + 推迟 Sc(150)，整体水平居中
+                // 两枚按钮整体水平居中：总宽 Sc(176) + Sc(16) + Sc(150) = Sc(342)，半宽 Sc(171)。
+                //   跳过：w/2 - Sc(171)，占 [-171, +5]
+                //   推迟：w/2 + Sc(21)，占 [+21, +171]（5 + 16 = 21）
+                // 之前写的是 -Sc(184) / +Sc(8)，组中心落在 -13px 上，肉眼可见偏左。
                 // 描边宽度随 DPI 缩放，否则 150% 下 1px 细得像没画
                 int bw = Math.Max(1, Sc(1));
                 btnSkip = new RoundButton("跳过 (Esc/空格)", Sc(21),
                                           Ui.DarkBtnBg, Ui.DarkBtnHover,
                                           Ui.SkipText, Ui.Accent, bw);
                 btnSkip.Font = Ui.FontRowLabel;
-                btnSkip.SetBounds(w / 2 - Sc(184), yBtn, Sc(176), btnH);
+                btnSkip.SetBounds(w / 2 - Sc(171), yBtn, Sc(176), btnH);
                 btnSkip.Click += delegate
                 {
                     if (RequestSkip != null) RequestSkip(this, EventArgs.Empty);
@@ -953,7 +1077,7 @@ namespace EyeLite
                                                           Ui.DarkBtnBg, Ui.DarkBtnHover,
                                                           Ui.DarkBtnText, Ui.DarkBtnBorder, bw);
                 btnPostpone.Font = Ui.FontRowLabel;
-                btnPostpone.SetBounds(w / 2 + Sc(8), yBtn, Sc(150), btnH);
+                btnPostpone.SetBounds(w / 2 + Sc(21), yBtn, Sc(150), btnH);
                 btnPostpone.Click += delegate
                 {
                     if (RequestPostpone != null) RequestPostpone(this, EventArgs.Empty);
@@ -961,17 +1085,13 @@ namespace EyeLite
                 this.Controls.Add(btnPostpone);
             }
 
-            // ---- 快捷键：Esc 与 空格 等效跳过 ----
-            this.KeyDown += delegate(object s, KeyEventArgs e)
-            {
-                if (!(this.allowSkip && this.showButtons)) return;
-                if (e.KeyCode == Keys.Escape || e.KeyCode == Keys.Space)
-                {
-                    e.Handled = true;
-                    e.SuppressKeyPress = true;   // 防止 KeyPress/KeyUp 再触发一次
-                    if (RequestSkip != null) RequestSkip(this, EventArgs.Empty);
-                }
-            };
+            // 这里原来挂着一个 KeyDown 处理器（Esc/空格跳过）。已删除，原因：
+            //   1. 遮罩是 WS_EX_NOACTIVATE + ShowWithoutActivation，永远不是前台窗体，
+            //      这段 KeyDown 永远不会触发（是死代码）；
+            //   2. 它内部的判定是裸 e.KeyCode == Keys.Space，没有修饰键守卫，
+            //      一旦以后有人恢复 Activate()，Ctrl/Shift+Space 误跳过的 bug 会原样复活。
+            // 跳过现在只走 KeyboardGuard 全局钩子（含裸按键判定与 drain 收尾）。
+            // RequestSkip 事件保留不动 —— btnSkip.Click 仍在用。
 
             // ---- 淡入定时器（字段复用，进程内每个屏幕一个）----
             fadeTimer = new System.Windows.Forms.Timer();
@@ -1490,8 +1610,28 @@ namespace EyeLite
             cancel.DialogResult = DialogResult.Cancel;
             this.Controls.Add(cancel);
 
+            // 严格模式的实际效果取决于「允许跳过」：
+            //   能跳过时 → 全吞键盘（Esc/空格就是出口）
+            //   禁跳时   → 不能全吞（否则无出口死锁），只能拦系统键
+            // 两个开关的名字看不出这层关系，必须用文案说清（行为不变，只改文字）。
+            chkAllowSkip.CheckedChanged += delegate { UpdateStrictText(); };
+            UpdateStrictText();
+
             this.AcceptButton = ok;
             this.CancelButton = cancel;
+        }
+
+        /// <summary>
+        /// 严格模式的说明文字随「允许跳过」联动。
+        /// 构造期间控件可能还没建好，必须判空。
+        /// </summary>
+        private void UpdateStrictText()
+        {
+            if (chkStrict == null || chkAllowSkip == null) return;
+
+            chkStrict.Text = chkAllowSkip.Checked
+                ? "严格模式：休息时屏蔽整个键盘（Esc / 空格可跳过）"
+                : "严格模式：休息时只拦系统键（键盘仍可用）";
         }
 
         private RoundPanel AddCard(int top, int height, string title)
@@ -1676,6 +1816,15 @@ namespace EyeLite
         {
             try
             {
+                // drain 收尾双保险：keyup 事件可能丢失（secure desktop 切换 / RDP 断连 /
+                // 拔键盘），这里一旦发现键其实已经物理抬起就立刻收尾，不必干等 2 秒定时器。
+                try
+                {
+                    if (KeyboardGuard.IsDraining && !KeyboardGuard.IsDrainKeyDown)
+                        KeyboardGuard.ForceUninstall();
+                }
+                catch { }
+
                 // 空闲暂停只在"工作"阶段生效：休息倒计时必须一直走。
                 // （paused 不会冻住休息——TogglePause 在休息期间直接拒绝。）
                 if (paused || (!isResting && IsIdleTooLong()))
@@ -1689,6 +1838,25 @@ namespace EyeLite
                     restRemaining--;
                     if (restRemaining <= 0) { EndRest(true); return; }
                     UpdateRestUI();
+
+                    // 每秒重申一次置顶：TopMost + WS_EX_TOOLWINDOW 只保证层级，
+                    // 压不住别的 TopMost 窗口（播放器小窗、录屏、部分 Electron 应用）。
+                    // 遮罩被盖住 = 提醒静默失效，用户以为程序坏了。
+                    // SWP_NOACTIVATE 是铁律：少了它就会抢焦点，破坏"不打断输入法组词"。
+                    for (int i = 0; i < restForms.Count; i++)
+                    {
+                        try
+                        {
+                            RestForm f = restForms[i];
+                            // 重建/释放过的窗体可能还在列表里被遍历到，
+                            // 对已释放窗体调 SetWindowPos 会抛 ObjectDisposedException。
+                            if (f == null || f.IsDisposed || !f.IsHandleCreated) continue;
+
+                            SetWindowPos(f.Handle, HWND_TOPMOST, 0, 0, 0, 0,
+                                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                        }
+                        catch { }
+                    }
                 }
                 else
                 {
@@ -1806,7 +1974,9 @@ namespace EyeLite
                 try { ResetWork(); } catch { }
             }
 
-            try { KeyboardGuard.Uninstall(); } catch { }
+            // 走 RequestUninstall：如果用户还按着跳过键，等它的 keyup 再真正卸载
+            //（否则后续 key-repeat 会漏进下层文档），2 秒兜底强制卸载。
+            try { KeyboardGuard.RequestUninstall(); } catch { }
             KeyboardGuard.OnSkipKey = null;   // 卸载后再清，避免静态字段长期持有 TrayApp
 
             for (int i = 0; i < restForms.Count; i++)
@@ -2068,6 +2238,17 @@ namespace EyeLite
 
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        // 休息期间每秒重申置顶用（不是 GDI 操作，不违反"每秒零 GDI 新建"）
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+                                                int X, int Y, int cx, int cy, uint uFlags);
+
+        private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        private const uint SWP_NOSIZE = 0x0001;
+        private const uint SWP_NOMOVE = 0x0002;
+        private const uint SWP_NOACTIVATE = 0x0010;
+        private const uint SWP_NOOWNERZORDER = 0x0200;
     }
 
     // ================================================================
@@ -2096,6 +2277,22 @@ namespace EyeLite
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+
+                // Application.Run 之前 SynchronizationContext.Current 往往是 null
+                // （WinForms 是在消息循环/首个控件创建时才装它）。这里是钩子回调
+                // 投递 UI 工作的唯一通道，必须显式装好，否则 Post 会静默丢委托，
+                // 表现为"按了 Esc 也没反应"。
+                try
+                {
+                    if (System.Threading.SynchronizationContext.Current == null)
+                    {
+                        System.Threading.SynchronizationContext.SetSynchronizationContext(
+                            new System.Windows.Forms.WindowsFormsSynchronizationContext());
+                    }
+                    Ui.Context = System.Threading.SynchronizationContext.Current;
+                }
+                catch { }
+
                 Application.Run(new TrayApp());
             }
         }
