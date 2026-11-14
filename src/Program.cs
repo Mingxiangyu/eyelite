@@ -889,6 +889,41 @@ namespace EyeLite
     }
 
     // ================================================================
+    // 3.6 单调时钟（契约 §4「时钟源」）
+    // ================================================================
+    /// <summary>
+    /// 单调时钟锚点。
+    ///
+    /// 为什么不用 DateTime.Now：系统时间被往前调时差值会是负的，往后调则凭空多出时间。
+    /// 为什么不用 Stopwatch 实例的 Start/Stop：语义易错（谁负责 Start、谁负责 Stop、
+    /// 重复 Start 会抛异常），而且我们只要"两个时刻之间的差"。
+    /// 为什么不用 tick 累加（旧的 workRemaining-- 写法）：Timer 迟到一次，计时就少一秒；
+    /// 机器睡一觉醒来，计数器会悄悄落后或超前 —— 调研文档反模式 5 说的就是这个。
+    ///
+    /// 契约要求"单次 tick 内只取一次 NowMs()"：取两次会产生微小负差，钳到 0 会让秒数来回跳。
+    /// </summary>
+    internal static class Clock
+    {
+        /// <summary>把 Stopwatch 的 tick 频率换算成毫秒比例（静态只算一次）。</summary>
+        private static readonly double msPerTick = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+        /// <summary>当前单调时刻（毫秒）。只在进程内比较有效，不做绝对时间用途。</summary>
+        public static long NowMs()
+        {
+            return (long)(System.Diagnostics.Stopwatch.GetTimestamp() * msPerTick);
+        }
+
+        /// <summary>
+        /// 两个单调时刻的差（毫秒），负数归零。
+        /// </summary>
+        public static long DeltaMs(long later, long earlier)
+        {
+            long d = later - earlier;
+            return d < 0 ? 0 : d;
+        }
+    }
+
+    // ================================================================
     // 3.5 身体活动计数来源（G14 预留接口，当前故意不做任何实现）
     // ================================================================
     /// <summary>
@@ -1943,11 +1978,36 @@ namespace EyeLite
         private bool paused = false;
         private bool isResting = false;
         private bool strictWarned = false;    // 严格模式降级提示只弹一次
-        private int workRemaining = 0;
-        private int restRemaining = 0;
-        private int restTotal = 0;
-        // 第二套时钟：离下次"起身活动"还剩多少秒。0 且 SedentaryEnabled=false 时永不触发。
-        private int sedRemaining = 0;
+
+        // ---- 计时状态（契约 §4：单调锚点，Timer 只负责重算 + 重绘）----
+        //
+        // 三套时钟的形态**不一样**，因为它们的"冻结"需求不一样：
+        //
+        //   工作/久坐：accum 形态（活跃时长累加）
+        //     为什么不用"到期时刻锚点"：那样一暂停或一空闲，锚点还在往前走，
+        //     恢复的瞬间就会判定到期 —— 旧的 tick 累加写法靠"暂停时直接 return"
+        //     天然冻结了计时，换成锚点必须显式处理，否则是行为回归。
+        //     accum 形态把"该不该累加"显式写出来：暂停 / 空闲 / 休息中都不累加。
+        //
+        //   休息：restDueMs 绝对锚点
+        //     休息倒计时**必须一直走**（契约 §5：休息中途人走开了，那是"休息"不是"空闲"），
+        //     结束时刻是绝对的，不需要冻结语义。
+        //
+        // 剩余秒数全部由 accum / 锚点**算出来**，不存"计数器"。
+        // 旧写法 workRemaining-- 是 tick 累加：Timer 迟到一次就少一秒，
+        // 机器睡一觉醒来计数器会悄悄落后 —— 调研文档反模式 5 说的就是这个。
+        private long workAccumMs = 0;        // 护眼/番茄钟：已累计的活跃毫秒
+        private long sedAccumMs = 0;         // 久坐：已累计的活跃毫秒
+        private long workLimitMs = 0;        // 护眼：当前到期阈值（推迟时会被延长）
+        private long sedLimitMs = 0;         // 久坐：当前到期阈值（推迟时会被延长）
+        private long lastAnchorMs = 0;       // 上次 tick 的单调时刻，用于算 dt
+        private DateTime lastTickUtc = DateTime.UtcNow;  // 上次 tick 的墙钟时刻，用于休眠补洞
+        private long idleGapSeconds = 0;     // 累计补记的空闲秒数（休眠/卡顿期间人不在）
+        private long restDueMs = 0;          // 当前这次休息的结束时刻（绝对锚点）
+        private int restTotalSeconds = 0;    // 本次休息总时长（秒），给 UI 用
+        private int restRemaining = 0;        // 本次休息剩余秒数（每次 tick 重算后给 UI 用）
+        private int workRemaining = 0;        // 工作剩余秒数（每次 tick 重算后给 UI 用）
+        private int sedRemaining = 0;         // 久坐剩余秒数（每次 tick 重算后给 UI 用）
         private int lastShown = -1;
 
         // 休息开始时的前台窗口；休息结束若发现前台被我们占了就还回去（安全网）
@@ -2043,13 +2103,41 @@ namespace EyeLite
             get { return cfg.PomodoroEnabled ? cfg.PomodoroRest * 60 : cfg.RestSeconds; }
         }
 
+        /// <summary>
+        /// 重置两套工作时钟（护眼 / 久坐），累加器归零、阈值重设。
+        ///
+        /// 契约 §3：跳过 = 满周期重新计时（activeSinceBreak = 0）。
+        /// 两套时钟必须**一起**重置：休息结束时如果只重置护眼、久坐累加器还停在过去，
+        /// 下一秒就会立刻再次触发久坐提醒。
+        /// </summary>
         private void ResetWork()
         {
-            workRemaining = WorkTotalSeconds;
-            // 久坐时钟与护眼时钟一起归零：休息结束（EndRest → ResetWork）时两套时钟
-            // 必须同时重新起算，否则刚休息完会立刻再触发一次久坐提醒。
-            sedRemaining = cfg.SedentaryEnabled ? cfg.SedentaryMinutes * 60 : 0;
+            workAccumMs = 0;
+            sedAccumMs = 0;
+            workLimitMs = (long)WorkTotalSeconds * 1000L;
+            sedLimitMs = cfg.SedentaryEnabled ? (long)cfg.SedentaryMinutes * 60L * 1000L : 0;
+            lastAnchorMs = Clock.NowMs();
+            RefreshRemaining();
             UpdateTrayText();
+        }
+
+        /// <summary>
+        /// 按当前累加器重算三个"剩余秒数"（只给 UI 用，不参与计时判定）。
+        /// </summary>
+        private void RefreshRemaining()
+        {
+            workRemaining = workLimitMs > 0 ? SecondsLeft(workLimitMs - workAccumMs) : 0;
+            sedRemaining = cfg.SedentaryEnabled && sedLimitMs > 0
+                ? SecondsLeft(sedLimitMs - sedAccumMs)
+                : 0;
+            if (isResting) restRemaining = SecondsLeft(restDueMs - Clock.NowMs());
+        }
+
+        /// <summary>剩余毫秒转剩余秒（向上取整：还有 1.2 秒时显示 2 秒，用户看到 0 秒就该弹了）。</summary>
+        private static int SecondsLeft(long msLeft)
+        {
+            if (msLeft <= 0) return 0;
+            return (int)((msLeft + 999) / 1000);
         }
 
         private void OnTick(object sender, EventArgs e)
@@ -2065,18 +2153,43 @@ namespace EyeLite
                 }
                 catch { }
 
-                // 空闲暂停只在"工作"阶段生效：休息倒计时必须一直走。
-                // （paused 不会冻住休息——TogglePause 在休息期间直接拒绝。）
-                if (paused || (!isResting && IsIdleTooLong()))
+                // 单次 tick 内只取一次 NowMs()（契约 §4）：取两次会产生微小负差，
+                // 钳到 0 会让秒数来回跳。
+                long now = Clock.NowMs();
+                long dt = Clock.DeltaMs(now, lastAnchorMs);
+                long wallDelta = (long)(DateTime.UtcNow - lastTickUtc).TotalSeconds;
+                lastTickUtc = DateTime.UtcNow;
+                lastAnchorMs = now;
+
+                // ---- 休眠补洞（契约 §5）----
+                //
+                // 机器睡了一觉，dt 可能是几小时。那段时间人不在屏幕前，
+                // **绝不能**加进"活跃时长"——否则第二天显示"连续用眼 8 小时"。
+                //
+                // 双时钟差两条规则（不依赖"QPC 是否跨 S3 停走"这个未验证的系统行为）：
+                //   情形一：wallDelta - qpcDelta > 60 → 真休眠（QPC 停走）→ 补 Idle
+                //   情形二：qpcDelta > 60          → 进程卡顿/挂起（QPC 继续走）→ 补 Idle
+                // 两种硬件行为都能覆盖，不需要事先验证。
+                long qpcDeltaSec = dt / 1000;
+                bool sleptAway = (wallDelta - qpcDeltaSec > 60) || (qpcDeltaSec > 60);
+                if (sleptAway)
                 {
-                    UpdateTrayText();
-                    return;
+                    // 补记的时段一律归 Idle（Paused 语义），不补进活跃时长。
+                    // 单次补记封顶 24 小时（契约 §5 兜底第 1 条）。
+                    long gap = wallDelta > 0 ? wallDelta : qpcDeltaSec;
+                    if (gap > 86400) gap = 86400;
+                    idleGapSeconds += gap;
+                    // 锚点重置，让下一 tick 从 0 开始累加，不把这段补洞时长算进活跃时长。
+                    dt = 0;
                 }
 
                 if (isResting)
                 {
-                    restRemaining--;
-                    if (restRemaining <= 0) { EndRest(true); return; }
+                    // 休息结束判定看绝对锚点，不看"减一"：Timer 迟到或系统卡顿时，
+                    // 休息时间照样是真实流逝的那几秒。
+                    // 休息期间**不累加**工作时钟（契约 §5：休息段单独成桶）。
+                    if (now >= restDueMs) { EndRest(true); return; }
+                    RefreshRemaining();
                     UpdateRestUI();
 
                     // 每秒重申一次置顶：TopMost + WS_EX_TOOLWINDOW 只保证层级，
@@ -2100,12 +2213,42 @@ namespace EyeLite
                 }
                 else
                 {
-                    workRemaining--;
-                    // 两套时钟并行递减，久坐优先判断：久坐到点时护眼可能还剩一半，
+                    // 到点判定看**累加器**，不做 tick 累加（契约 §4 / 调研反模式 5）。
+                    // 累加器只在"真的在工作"时前进：暂停 / 空闲 / 休息中都不加。
+                    //
+                    // dt 的口径：now - lastAnchorMs。Timer 迟到时 dt 会大于 1 秒，
+                    // 这正是我们想要的——真实流逝了多少就加多少，不会因为迟到而少算。
+                    // 但机器睡了一觉醒来，dt 会是几小时：那段时间人不在屏幕前，
+                    // 不该算进"活跃时长"。所以上面已经把休眠段扣掉了（dt = 0）。
+                    bool idle = IsIdleTooLong();
+
+                    // ---- D2：空闲超过整个休息时长 → 当作已经休息过了，直接重置周期 ----
+                    // 调研文档 D2 的原话："idle 超过整个休息时长 → 当作已休息，直接重置周期"。
+                    // 不这么做会怎样：用户开完 40 分钟会（空闲 40 分钟 > 休息 20 秒），
+                    // 回来时累加器已经满 → 立刻弹一次休息。但人**已经休息了 40 分钟**，
+                    // 这一弹纯属打扰，还会让人"刚坐下就被弹"。
+                    if (idle && IdleSeconds() >= RestTotalSeconds)
+                    {
+                        ResetWork();
+                        UpdateTrayText();
+                        return;
+                    }
+
+                    if (!paused && !idle)
+                    {
+                        workAccumMs += dt;
+                        if (cfg.SedentaryEnabled) sedAccumMs += dt;
+                    }
+
+                    // 久坐优先：久坐到点时护眼可能还剩一半，
                     // 此时必须出"活动一下"，而不是把久坐额度悄悄吞掉。
-                    if (cfg.SedentaryEnabled && sedRemaining > 0) sedRemaining--;
-                    if (cfg.SedentaryEnabled && sedRemaining <= 0) { BeginRest(true); return; }
-                    if (workRemaining <= 0) { BeginRest(false); return; }
+                    bool sedDue = cfg.SedentaryEnabled && sedLimitMs > 0 && sedAccumMs >= sedLimitMs;
+                    bool workDue = workLimitMs > 0 && workAccumMs >= workLimitMs;
+
+                    if (sedDue) { BeginRest(true); return; }
+                    if (workDue) { BeginRest(false); return; }
+
+                    RefreshRemaining();
                     UpdateTrayText();
                 }
             }
@@ -2145,8 +2288,9 @@ namespace EyeLite
             catch { savedForeground = IntPtr.Zero; }
 
             isResting = true;
-            restTotal = bodyBreak ? cfg.SedentarySeconds : RestTotalSeconds;
-            restRemaining = restTotal;
+            restTotalSeconds = bodyBreak ? cfg.SedentarySeconds : RestTotalSeconds;
+            restDueMs = Clock.NowMs() + (long)restTotalSeconds * 1000L;
+            restRemaining = restTotalSeconds;
             lastShown = -1;
 
             EnsureRestForms();
@@ -2309,11 +2453,26 @@ namespace EyeLite
                 f.RequestPostpone += delegate
                 {
                     EndRest(false);
-                    workRemaining = cfg.PostponeMinutes * 60;
-                    // 久坐时钟必须一起重置：EndRest(false) 故意不调 ResetWork，
-                    // 此时 sedRemaining 还停在 0，下一秒 tick 会立刻再次 BeginRest(true)，
+                    // 推迟 = 本轮**不结束**，只改到期时刻（契约 §3），计数不清零。
+                    // 久坐时钟必须一起推迟：否则 sedAccumMs 还停在过去，
+                    // 下一秒 tick 会立刻再次 BeginRest(true)，
                     // 「推迟」就成了"推迟 5 分钟后马上又弹活动遮罩"的死循环。
-                    sedRemaining = cfg.SedentaryEnabled ? cfg.SedentaryMinutes * 60 : 0;
+                    long now = Clock.NowMs();
+                    long dt = Clock.DeltaMs(now, lastAnchorMs);
+                    lastAnchorMs = now;
+
+                    // 推迟的语义是"本轮不结束，只把到期推后"：
+                    // 累加器**不清零**，只把阈值往前推一个 PostponeMinutes。
+                    workLimitMs += (long)cfg.PostponeMinutes * 60L * 1000L;
+                    if (cfg.SedentaryEnabled && sedLimitMs > 0)
+                    {
+                        // 久坐的累加器也要清零后再重新起算，否则"已坐了 44 分钟、
+                        // 推迟 5 分钟后 1 分钟就又到点"会很突兀。
+                        // 语义与护眼一致：推迟 = 本轮不结束，阈值后移。
+                        sedLimitMs = Math.Max(sedLimitMs, (long)cfg.SedentaryMinutes * 60L * 1000L);
+                        sedLimitMs += (long)cfg.PostponeMinutes * 60L * 1000L;
+                    }
+                    RefreshRemaining();
                     UpdateTrayText();
                 };
                 restForms.Add(f);
@@ -2327,7 +2486,7 @@ namespace EyeLite
             lastShown = restRemaining;
             for (int i = 0; i < restForms.Count; i++)
             {
-                try { restForms[i].UpdateView(restRemaining, restTotal); }
+                try { restForms[i].UpdateView(restRemaining, restTotalSeconds); }
                 catch { }
             }
         }
@@ -2372,22 +2531,38 @@ namespace EyeLite
 
             paused = !paused;
             miPause.Text = paused ? "继续计时" : "暂停计时";
+            // 暂停/恢复时必须重置锚点，否则恢复后的第一个 tick 会把**暂停期间的时长**
+            // 一次性加进累加器（dt = now - lastAnchorMs，暂停了 10 分钟就多算 10 分钟）。
+            // 累加器形态下"不累加"只挡住了本次累加，没挡住 dt 本身在积累。
+            lastAnchorMs = Clock.NowMs();
+            RefreshRemaining();
             UpdateTrayText();
         }
 
         // ---------- 空闲检测 ----------
-        private bool IsIdleTooLong()
+        //
+        // 返回"已空闲的秒数"（不是布尔），因为 D2 需要区分两种空闲：
+        //   · 空闲 < IdleMinutes     → 只是暂停计时（人短暂离开）
+        //   · 空闲 > 整个休息时长   → 当作**已经休息过了**，直接重置周期
+        // 第二个需求必须有实际秒数才能判断，只返回布尔就做不到。
+        private int IdleSeconds()
         {
-            if (cfg.IdleMinutes <= 0) return false;
             try
             {
                 LASTINPUTINFO lii = new LASTINPUTINFO();
                 lii.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
-                if (!GetLastInputInfo(ref lii)) return false;
+                if (!GetLastInputInfo(ref lii)) return 0;
                 uint idleMs = unchecked((uint)Environment.TickCount) - lii.dwTime;
-                return idleMs >= (uint)(cfg.IdleMinutes * 60 * 1000);
+                return (int)(idleMs / 1000);
             }
-            catch { return false; }
+            catch { return 0; }
+        }
+
+        /// <summary>空闲是否已超过阈值（cfg.IdleMinutes &lt;= 0 时永不为真，等于关掉该检测）。</summary>
+        private bool IsIdleTooLong()
+        {
+            if (cfg.IdleMinutes <= 0) return false;
+            return IdleSeconds() >= cfg.IdleMinutes * 60;
         }
 
         // ---------- 设置 ----------
