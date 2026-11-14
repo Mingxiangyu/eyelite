@@ -1,0 +1,9 @@
+# 行尾策略：仓库统一 LF，且**禁止 git 做任何自动转换**。
+#
+# 为什么：Windows 上 core.autocrlf=true 时，每次 git add 都会把 LF 当成"将被替换为 CRLF"，
+# 刷一屏 warning，并且真的在工作区写出 CRLF —— 而项目要求 Program.cs 保持 LF
+# （见 README 与契约 §0）。加 `-text` 让 git 把文件当二进制处理、原样存储，从此不再转换。
+#
+# 批处理也保持 LF：本仓库的 build.cmd / checkmem.cmd 一直是 LF，且 csc 构建路径已验证可用，
+# 不要为了"看起来规范"把它们改成 CRLF —— 那会让 diff 覆盖整个文件。
+* -text
