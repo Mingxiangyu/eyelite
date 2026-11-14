@@ -56,12 +56,10 @@ if ($null -ne $peTime) {
 } else {
     Write-Host "  built     : (not a PE file, or no timestamp)"
 }
-try {
-    $md5 = (Get-FileHash -LiteralPath $full -Algorithm MD5).Hash.ToLower()
-    Write-Host "  md5       : $md5"
-} catch {
-    Write-Host "  md5       : (Get-FileHash unavailable)"
-}
+# Deliberately no hash of this file. csc 4.0.30319 has no /deterministic, so the
+# PE header timestamp feeds the hash: the same source rebuilt a minute later gives
+# a different md5. A value that cannot serve any judgement must not be printed,
+# or it will be quoted as a version id. Use the source md5 from build.cmd instead.
 Write-Host ""
 
 # ---------------------------------------------------------------- helpers
