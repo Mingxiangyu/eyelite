@@ -94,6 +94,10 @@ namespace EyeLite
         public static readonly Color PrimaryHover = Color.FromArgb(0x2C, 0x39, 0x4B);
         public static readonly Color SecondaryBorder = Color.FromArgb(0xD5, 0xDB, 0xE4); // #D5DBE4
         public static readonly Color SecondaryHover = Color.FromArgb(0xF0, 0xF3, 0xF7);
+        // 输入框底色/描边：数值框改成无边框后靠 RoundPanel 画圆角描边，
+        // 底色与卡片白底（#FFFFFF）拉开一档，让"可输入"这件事有一个安静的边界。
+        public static readonly Color InputBg = Color.FromArgb(0xF7, 0xF9, 0xFC);       // #F7F9FC
+        public static readonly Color InputBorder = Color.FromArgb(0xE4, 0xEA, 0xF2);   // #E4EAF2
 
         // ---- 共享字体（static readonly，进程内只建一次，永不释放）----
         public static readonly Font FontHint = new Font("微软雅黑", 20f, FontStyle.Regular);      // 遮罩主提示
@@ -135,18 +139,29 @@ namespace EyeLite
         /// </summary>
         public static float DetectScale(Control c)
         {
-            // 第 1 步：屏幕 DC。进程已 SetProcessDPIAware（系统级 DPI 感知），
-            //    GetDeviceCaps(LOGPIXELSX) 直接给系统 DPI（144 -> 1.5），
-            //    与"控件是否已建句柄"无关，最可靠。
+            // 第 1 步：GDI 屏幕 DC + GetDeviceCaps。
+            //    **不能用 Graphics.FromHwnd(IntPtr.Zero).DpiX**：GDI+ 在进程启动时把屏幕
+            //    DPI 缓存进全局状态。Ui 是 beforefieldinit 类，那 9 个静态字体可能在
+            //    Main 第一条语句之前就被初始化 —— 那时进程还没 SetProcessDPIAware()，
+            //    GDI+ 记下的就是 96，且此后永久返回 96。而 GDI 文本（TextRenderer）
+            //    用的是实时 DC，照样按 144 渲染 —— 结果是"布局按 96、文字按 144"，
+            //    文字被裁掉一截（2026-11-14 实测，150% 机器）。
+            //    GetDeviceCaps 不缓存，永远给实时值，且与控件是否建句柄无关。
+            IntPtr screenDc = IntPtr.Zero;
             try
             {
-                using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
+                screenDc = GetDC(IntPtr.Zero);
+                if (screenDc != IntPtr.Zero)
                 {
-                    float k1 = g.DpiX / 96f;
-                    if (k1 > 0.5f && k1 < 4f) return k1;
+                    int dpi = GetDeviceCaps(screenDc, LOGPIXELSX);
+                    if (dpi >= 48 && dpi <= 384) return dpi / 96f;
                 }
             }
             catch { }
+            finally
+            {
+                if (screenDc != IntPtr.Zero) { try { ReleaseDC(IntPtr.Zero, screenDc); } catch { } }
+            }
 
             // 第 2 步（回退）：只有已建句柄时 DeviceDpi 才可信；无句柄时它返回 96 会误判成 1.0，
             //    所以这里必须再加 >1.05 的门槛。走反射以兼容 .NET 4.7 以下的引用程序集。
@@ -167,6 +182,20 @@ namespace EyeLite
 
             return 1f;
         }
+
+        private const int LOGPIXELSX = 88;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        private static extern int GetDeviceCaps(IntPtr hdc, int index);
+
+        /// <summary>设置面板上显示的版本号；发布时与 git tag 同步，只改这一处。</summary>
+        public const string AppVersion = "v1.1.2";
 
         /// <summary>圆角矩形路径。调用方负责 Dispose。</summary>
         public static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -389,6 +418,99 @@ namespace EyeLite
             }
             base.Dispose(disposing);
             if (reg != null) reg.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// 自绘复选框：18px 圆角方块 + 文字。
+    /// 目的是去掉 WinForms 主题的 3D 勾选框与方块底色，和设置页的扁平卡片对齐。
+    /// 只画，不改交互：AutoCheck / 点击切换仍由 CheckBox 基类处理。
+    /// </summary>
+    internal class FlatCheckBox : CheckBox
+    {
+        // 方块固定 18px（不乘 DPI）：控件高度已由 AddCheck 按 DPI 给足，
+        // 方块再随 DPI 放大会高出文字一大截，与"安静、精确"的调性相反。
+        private const int BoxSize = 18;
+        private const int BoxRadius = 4;
+        private const int TextX = 26;       // 文字起点 = 方块 18 + 间距 8
+
+        public FlatCheckBox()
+        {
+            this.SetStyle(ControlStyles.UserPaint |
+                          ControlStyles.AllPaintingInWmPaint |
+                          ControlStyles.OptimizedDoubleBuffer |
+                          ControlStyles.ResizeRedraw, true);
+            this.BackColor = Ui.CardBg;
+        }
+
+        // UserPaint 下 WinForms 不再自动重绘，状态变化必须自己触发一次
+        protected override void OnCheckedChanged(EventArgs e)
+        {
+            base.OnCheckedChanged(e);
+            this.Invalidate();
+        }
+
+        protected override void OnEnabledChanged(EventArgs e)
+        {
+            base.OnEnabledChanged(e);
+            this.Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.Clear(this.BackColor);
+
+            int boxY = (this.ClientSize.Height - BoxSize) / 2;
+            if (boxY < 0) boxY = 0;
+            Rectangle box = new Rectangle(0, boxY, BoxSize, BoxSize);
+
+            // 所有 Path / Brush / Pen 都在 using 里，方法返回即释放（不新增 GDI 句柄泄漏点）
+            if (this.Checked)
+            {
+                // 选中：深墨蓝实心 + 白色圆头对勾
+                using (GraphicsPath path = Ui.RoundedRect(box, BoxRadius))
+                using (SolidBrush fill = new SolidBrush(Ui.PrimaryBg))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.FillPath(fill, path);
+                }
+                using (Pen check = new Pen(Color.White, 2f))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    check.StartCap = LineCap.Round;
+                    check.EndCap = LineCap.Round;
+                    check.LineJoin = LineJoin.Round;
+                    g.DrawLines(check, new Point[]
+                    {
+                        new Point(box.X + 4, box.Y + 9),
+                        new Point(box.X + 7, box.Y + 13),
+                        new Point(box.X + 14, box.Y + 5)
+                    });
+                }
+            }
+            else
+            {
+                // 未选中：白底 + 1px 浅描边（与输入框同一套线条色）
+                using (GraphicsPath path = Ui.RoundedRect(box, BoxRadius))
+                using (SolidBrush fill = new SolidBrush(Color.White))
+                using (Pen edge = new Pen(Ui.InputBorder, 1f))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.FillPath(fill, path);
+                    g.DrawPath(edge, path);
+                }
+            }
+
+            // 文字沿用控件自身的 Font（由 AddCheck 赋 Ui.FontRowLabel），这里绝不新建 Font
+            Color fore = this.Enabled ? Ui.LabelText : Ui.CaptionText;
+            int textW = this.ClientSize.Width - TextX;
+            if (textW < 1) textW = 1;
+            Rectangle textRect = new Rectangle(TextX, 0, textW, this.ClientSize.Height);
+            TextRenderer.DrawText(g, this.Text, this.Font, textRect, fore,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix |
+                TextFormatFlags.EndEllipsis);
         }
     }
 
@@ -767,6 +889,21 @@ namespace EyeLite
     }
 
     // ================================================================
+    // 3.5 身体活动计数来源（G14 预留接口，当前故意不做任何实现）
+    // ================================================================
+    /// <summary>
+    /// 身体活动的计数来源。当前只有"自己数"一种实现（无实现类，走 UI 手动计数）。
+    /// TODO(v1.2)：接入摄像头姿态计数（可选档，默认关，模型必须本地推理、画面不出内存）。
+    ///              届时新增 CameraBodyCounter : IBodyCounter，并在 SettingsForm 里打开被禁用的开关。
+    /// </summary>
+    internal interface IBodyCounter
+    {
+        void Start();
+        void Stop();
+        int Reps { get; }
+    }
+
+    // ================================================================
     // 4. 配置
     // ================================================================
     internal class AppConfig
@@ -782,6 +919,15 @@ namespace EyeLite
         public bool SoundEnabled = true;
         public bool StrictMode = true;
         public bool StartWithWindows = false;
+
+        // 久坐/活动是**第二套时钟**，与护眼节奏独立：
+        // 护眼（WorkMinutes/RestSeconds）管"看远处 20 秒"，久坐管"45 分钟起身 2 分钟"。
+        public bool SedentaryEnabled = true;
+        public int SedentaryMinutes = 45;
+        public int SedentarySeconds = 120;
+
+        // G14 预留：摄像头姿态计数（v1.2）。当前无实现类，开关在设置页被禁用。
+        public bool CameraCountEnabled = false;
 
         public static string ConfigDir
         {
@@ -826,6 +972,10 @@ namespace EyeLite
                         case "SoundEnabled": c.SoundEnabled = v == "1"; break;
                         case "StrictMode": c.StrictMode = v == "1"; break;
                         case "StartWithWindows": c.StartWithWindows = v == "1"; break;
+                        case "SedentaryEnabled": c.SedentaryEnabled = v == "1"; break;
+                        case "SedentaryMinutes": c.SedentaryMinutes = Clamp(v, 45, 15, 180); break;
+                        case "SedentarySeconds": c.SedentarySeconds = Clamp(v, 120, 30, 300); break;
+                        case "CameraCountEnabled": c.CameraCountEnabled = v == "1"; break;
                     }
                 }
             }
@@ -861,6 +1011,10 @@ namespace EyeLite
                 sb.AppendLine("SoundEnabled=" + (SoundEnabled ? "1" : "0"));
                 sb.AppendLine("StrictMode=" + (StrictMode ? "1" : "0"));
                 sb.AppendLine("StartWithWindows=" + (StartWithWindows ? "1" : "0"));
+                sb.AppendLine("SedentaryEnabled=" + (SedentaryEnabled ? "1" : "0"));
+                sb.AppendLine("SedentaryMinutes=" + SedentaryMinutes);
+                sb.AppendLine("SedentarySeconds=" + SedentarySeconds);
+                sb.AppendLine("CameraCountEnabled=" + (CameraCountEnabled ? "1" : "0"));
                 File.WriteAllText(ConfigPath, sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -1479,13 +1633,16 @@ namespace EyeLite
     // ================================================================
     internal class SettingsForm : Form
     {
-        private NumericUpDown numWork, numRest, numPomoWork, numPomoRest, numPostpone, numIdle;
-        private CheckBox chkPomodoro, chkAllowSkip, chkSound, chkStrict, chkAutoStart;
+        private NumericUpDown numWork, numRest, numPomoWork, numPomoRest,
+                              numSedMinutes, numSedSeconds, numPostpone, numIdle;
+        private CheckBox chkPomodoro, chkSedentary, chkAllowSkip, chkSound, chkStrict, chkAutoStart;
 
         // 版式常量（以下全部是 96dpi 下的设计值，运行时一律经 Sc() 乘 DPI 因子）
-        // 设计基准客户区 520 x 692
+        // 设计基准客户区 520 x 888：
+        //   88(页头) + 112(节奏) + 16 + 144(番茄钟) + 16 + 144(久坐与活动) + 16
+        //   + 272(行为，7 行) + 24 + 38(按钮) + 18(底部留白) = 888
         private const int FormW = 520;
-        private const int FormH = 692;
+        private const int FormH = 888;
         private const int CardLeft = 24;
         private const int CardWidth = 472;      // 520 - 24 * 2
         private const int CardPad = 22;         // 卡片左右内边距
@@ -1495,7 +1652,7 @@ namespace EyeLite
         private const int CheckHeight = 26;
         private const int NumWidth = 96;
         private const int NumHeight = 30;
-        private const int Gap = 14;
+        private const int Gap = 16;
 
         // DPI 缩放因子（1.0 = 96dpi）。字体是 pt 会随 DPI 放大，盒子必须同比放大，
         // 否则"字体高度 : 盒子高度"随 DPI 变化，文字就被裁。
@@ -1567,8 +1724,32 @@ namespace EyeLite
             lblTitle.BackColor = Ui.PageBg;
             lblTitle.AutoSize = false;
             lblTitle.TextAlign = ContentAlignment.MiddleLeft;
-            lblTitle.SetBounds(Sc(CardLeft), Sc(48), Sc(340), Sc(28));
+            // 高度按字体实测：19pt 粗体的行高随 DPI 变化，写死 28px 会裁掉字形下缘
+            // （2026-11-14 实测，150% 机器上被裁掉约一成）。
+            int titleH = TextRenderer.MeasureText(lblTitle.Text, lblTitle.Font).Height;
+            lblTitle.SetBounds(Sc(CardLeft), Sc(48), Sc(340), titleH + Sc(4));
             this.Controls.Add(lblTitle);
+
+            // 右侧版本号：包进一个浅色 chip，与标题同一视觉行。
+            // chip 右缘仍贴 Sc(CardLeft) + Sc(CardWidth)，label 在 chip 内右对齐、左右各留 Sc(8)。
+            RoundPanel chipVersion = new RoundPanel(Sc(8),
+                                                    Color.FromArgb(0xEE, 0xF2, 0xF8),
+                                                    Color.FromArgb(0xE3, 0xE9, 0xF2));
+            int chipW = Sc(64);
+            int chipH = Sc(22);
+            // 原 label 在 Sc(52) 处高 Sc(18)，中心 61；chip 高 22，上移 2px 保持同一视觉行
+            chipVersion.SetBounds(Sc(CardLeft) + Sc(CardWidth) - chipW, Sc(50), chipW, chipH);
+            this.Controls.Add(chipVersion);
+
+            Label lblVersion = new Label();
+            lblVersion.Text = Ui.AppVersion;
+            lblVersion.Font = Ui.FontEyebrow;
+            lblVersion.ForeColor = Ui.CaptionText;
+            lblVersion.BackColor = Color.FromArgb(0xEE, 0xF2, 0xF8);   // chip 底色，不用透明（见 AddCard 注释）
+            lblVersion.AutoSize = false;
+            lblVersion.TextAlign = ContentAlignment.MiddleRight;
+            lblVersion.SetBounds(Sc(8), 0, chipW - Sc(16), chipH);
+            chipVersion.Controls.Add(lblVersion);
 
             // ---------- 卡片 1：节奏（2 行）----------
             int y = Sc(88);
@@ -1584,8 +1765,16 @@ namespace EyeLite
             numPomoRest = AddRow(card2, Sc(FirstRowTop) + Sc(RowHeight) * 2, "番茄休息（分钟）", 1, 120, cfg.PomodoroRest);
             y += Sc(144) + Sc(Gap);
 
-            // ---------- 卡片 3：行为（6 行）----------
-            RoundPanel card3 = AddCard(y, Sc(240), "行为");
+            // ---------- 卡片 3：久坐与活动（3 行）----------
+            // 第二套时钟：与护眼节奏独立，久坐到点触发的是"活动休息"（正文案见 TrayApp.BeginRest）
+            RoundPanel cardSed = AddCard(y, Sc(144), "久坐与活动");
+            chkSedentary = AddCheck(cardSed, Sc(FirstRowTop), "启用久坐提醒（每小时起身活动）", cfg.SedentaryEnabled);
+            numSedMinutes = AddRow(cardSed, Sc(FirstRowTop) + Sc(RowHeight), "久坐间隔（分钟）", 15, 180, cfg.SedentaryMinutes);
+            numSedSeconds = AddRow(cardSed, Sc(FirstRowTop) + Sc(RowHeight) * 2, "活动时长（秒）", 30, 300, cfg.SedentarySeconds);
+            y += Sc(144) + Sc(Gap);
+
+            // ---------- 卡片 4：行为（7 行）----------
+            RoundPanel card3 = AddCard(y, Sc(272), "行为");
             chkAllowSkip = AddCheck(card3, Sc(FirstRowTop), "允许跳过 / 推迟休息", cfg.AllowSkip);
             numPostpone = AddRow(card3, Sc(FirstRowTop) + Sc(RowHeight), "推迟时长（分钟）", 1, 60, cfg.PostponeMinutes);
             numIdle = AddRow(card3, Sc(FirstRowTop) + Sc(RowHeight) * 2, "离开多少分钟后暂停计时", 0, 120, cfg.IdleMinutes);
@@ -1594,9 +1783,14 @@ namespace EyeLite
                                  "严格模式：休息时屏蔽整个键盘（Esc / 空格可跳过）", cfg.StrictMode);
             chkAutoStart = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 5,
                                     "开机自动启动", cfg.StartWithWindows);
+            // G14 预留：只放一个禁用的开关占位，**不写回配置**（cfg.CameraCountEnabled 保持原值），
+            // 避免用户以为勾上就生效。v1.2 有了 CameraBodyCounter 再解禁并接 IBodyCounter。
+            // 用局部变量而不是字段：没有读取方，留字段只会多一个"永远用不到"的状态位。
+            CheckBox chkCamera = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 6, "摄像头计数（暂未开放）", false);
+            chkCamera.Enabled = false;
 
             // ---------- 底部按钮：最后一排卡片底部 + Sc(24) ----------
-            int btnY = y + Sc(240) + Sc(24);
+            int btnY = y + Sc(272) + Sc(24);
 
             RoundButton ok = new RoundButton("保存", Sc(8), Ui.PrimaryBg, Ui.PrimaryHover,
                                              Color.White, Color.Empty, 0);
@@ -1668,23 +1862,40 @@ namespace EyeLite
             l.SetBounds(Sc(CardPad), top + Sc(4), Sc(250), Sc(24));
             card.Controls.Add(l);
 
+            // 数值框去 3D 边框：WinForms 默认的 FixedSingle + 系统主题边框是设置页里
+            // 唯一还带立体感的东西。改成 BorderStyle.None + 圆角容器描边。
+            //
+            // 容器右缘 = 原来数字框的右缘（右对齐位置一点没动），数字框作为子控件内嵌：
+            //   水平各留 Sc(6)（容器宽 = NumWidth + Sc(12)）
+            //   垂直不留 6：行槽只有 Sc(32)，容器做到 Sc(38) 会压到相邻行的文字，
+            //   所以容器高度取满 RowHeight，数字框在其中垂直居中（96dpi 下上下各 1px）。
+            int numRight = Sc(CardWidth) - Sc(CardPad) - 1;
+            int boxW = Sc(NumWidth) + Sc(12);
+            int boxH = Sc(RowHeight);
+
+            RoundPanel box = new RoundPanel(Sc(10), Ui.InputBg, Ui.InputBorder);
+            box.SetBounds(numRight - boxW, top, boxW, boxH);
+            card.Controls.Add(box);
+
             NumericUpDown n = new NumericUpDown();
             n.Minimum = min;
             n.Maximum = max;
             n.Value = val;
             n.Font = Ui.FontRowLabel;
-            n.BorderStyle = BorderStyle.FixedSingle;
+            n.BorderStyle = BorderStyle.None;
             n.TextAlign = HorizontalAlignment.Right;
+            n.BackColor = Ui.InputBg;
             n.AutoSize = false;
-            n.SetBounds(Sc(CardWidth) - Sc(CardPad) - Sc(NumWidth) - 1, top + Sc(1),
-                        Sc(NumWidth), Sc(NumHeight));
-            card.Controls.Add(n);
+            int numH = Sc(NumHeight);
+            int numY = top + (boxH - numH) / 2;
+            n.SetBounds(numRight - boxW + Sc(6), numY, Sc(NumWidth), numH);
+            box.Controls.Add(n);
             return n;
         }
 
         private CheckBox AddCheck(RoundPanel card, int top, string text, bool val)
         {
-            CheckBox c = new CheckBox();
+            CheckBox c = new FlatCheckBox();     // 自绘：去掉系统主题的 3D 勾选框
             c.Text = text;
             c.Checked = val;
             c.Font = Ui.FontRowLabel;
@@ -1704,12 +1915,17 @@ namespace EyeLite
             cfg.PomodoroEnabled = chkPomodoro.Checked;
             cfg.PomodoroWork = (int)numPomoWork.Value;
             cfg.PomodoroRest = (int)numPomoRest.Value;
+            cfg.SedentaryEnabled = chkSedentary.Checked;
+            cfg.SedentaryMinutes = (int)numSedMinutes.Value;
+            cfg.SedentarySeconds = (int)numSedSeconds.Value;
             cfg.AllowSkip = chkAllowSkip.Checked;
             cfg.PostponeMinutes = (int)numPostpone.Value;
             cfg.IdleMinutes = (int)numIdle.Value;
             cfg.SoundEnabled = chkSound.Checked;
             cfg.StrictMode = chkStrict.Checked;
             cfg.StartWithWindows = chkAutoStart.Checked;
+            // chkCamera 故意不写回：占位开关（Enabled=false），写回只会造出"配置说开了、
+            // 实际没实现"的假状态。
         }
     }
 
@@ -1730,6 +1946,8 @@ namespace EyeLite
         private int workRemaining = 0;
         private int restRemaining = 0;
         private int restTotal = 0;
+        // 第二套时钟：离下次"起身活动"还剩多少秒。0 且 SedentaryEnabled=false 时永不触发。
+        private int sedRemaining = 0;
         private int lastShown = -1;
 
         // 休息开始时的前台窗口；休息结束若发现前台被我们占了就还回去（安全网）
@@ -1762,6 +1980,22 @@ namespace EyeLite
             miPause = new ToolStripMenuItem("暂停计时");
             miPause.Click += delegate { TogglePause(); };
             menu.Items.Add(miPause);
+
+            // 托盘里也能直接切番茄钟：设置页要多点三次才能到，而这是高频开关。
+            // 只改配置 + 重建窗体签名，不碰计时状态机（休息中不动，工作剩余时长在
+            // ResetWork 里按新的 WorkTotalSeconds 重算）。
+            ToolStripMenuItem miPomodoro = new ToolStripMenuItem("番茄钟模式");
+            miPomodoro.CheckOnClick = true;
+            miPomodoro.Checked = cfg.PomodoroEnabled;
+            miPomodoro.Click += delegate
+            {
+                cfg.PomodoroEnabled = miPomodoro.Checked;
+                cfg.Save();
+                screenSignature = "";      // 参数变了，下次休息重建窗体（换配色）
+                if (!isResting) ResetWork();
+                UpdateTrayText();
+            };
+            menu.Items.Add(miPomodoro);
 
             menu.Items.Add(new ToolStripSeparator());
 
@@ -1812,6 +2046,9 @@ namespace EyeLite
         private void ResetWork()
         {
             workRemaining = WorkTotalSeconds;
+            // 久坐时钟与护眼时钟一起归零：休息结束（EndRest → ResetWork）时两套时钟
+            // 必须同时重新起算，否则刚休息完会立刻再触发一次久坐提醒。
+            sedRemaining = cfg.SedentaryEnabled ? cfg.SedentaryMinutes * 60 : 0;
             UpdateTrayText();
         }
 
@@ -1864,7 +2101,11 @@ namespace EyeLite
                 else
                 {
                     workRemaining--;
-                    if (workRemaining <= 0) { BeginRest(); return; }
+                    // 两套时钟并行递减，久坐优先判断：久坐到点时护眼可能还剩一半，
+                    // 此时必须出"活动一下"，而不是把久坐额度悄悄吞掉。
+                    if (cfg.SedentaryEnabled && sedRemaining > 0) sedRemaining--;
+                    if (cfg.SedentaryEnabled && sedRemaining <= 0) { BeginRest(true); return; }
+                    if (workRemaining <= 0) { BeginRest(false); return; }
                     UpdateTrayText();
                 }
             }
@@ -1890,7 +2131,13 @@ namespace EyeLite
             }
         }
 
-        private void BeginRest()
+        /// <summary>
+        /// 开始一次休息。
+        /// bodyBreak=true 表示这是久坐触发的「活动一下」，时长取 SedentarySeconds；
+        /// false 表示护眼/番茄钟休息，时长取 RestTotalSeconds。
+        /// 两条路走的是**同一个**状态机与遮罩，只是时长、文案与配色不同。
+        /// </summary>
+        private void BeginRest(bool bodyBreak)
         {
             // 记下当时的前台窗口，休息结束时若前台被我们占了就还回去。
             // 遮罩是 WS_EX_NOACTIVATE，理论上不会抢，这是点击按钮等情况下的保险。
@@ -1898,17 +2145,21 @@ namespace EyeLite
             catch { savedForeground = IntPtr.Zero; }
 
             isResting = true;
-            restTotal = RestTotalSeconds;
+            restTotal = bodyBreak ? cfg.SedentarySeconds : RestTotalSeconds;
             restRemaining = restTotal;
             lastShown = -1;
 
             EnsureRestForms();
 
-            bool pomo = cfg.PomodoroEnabled;
-            string eyebrow = pomo ? "番茄钟休息" : "休息一下";
-            string hint = pomo
-                ? "这一轮专注结束了，起身活动一下"
-                : "让眼睛看看 6 米外的东西，放松睫状肌";
+            // 文案三选一：活动休息 > 番茄钟休息 > 普通护眼。
+            // 活动休息**不要求坐满时长、也不判断是否在工位** —— 坐着舒展同样算数。
+            string eyebrow;
+            string hint;
+            if (bodyBreak) { eyebrow = "活动一下"; hint = "起身走两步，或者坐着舒展一下都行"; }
+            else if (cfg.PomodoroEnabled) { eyebrow = "番茄钟休息"; hint = "这一轮专注结束了，起身活动一下"; }
+            else { eyebrow = "休息一下"; hint = "让眼睛看看 6 米外的东西，放松睫状肌"; }
+
+            bool pomo = bodyBreak ? false : cfg.PomodoroEnabled;   // 身体休息不用番茄钟配色
 
             for (int i = 0; i < restForms.Count; i++)
             {
@@ -2018,7 +2269,7 @@ namespace EyeLite
         {
             if (isResting) return;
             if (paused) TogglePause();
-            BeginRest();
+            BeginRest(false);          // 手动「立即休息」= 护眼/番茄钟休息，不是活动休息
         }
 
         // ---------- 窗体复用 ----------
@@ -2059,6 +2310,10 @@ namespace EyeLite
                 {
                     EndRest(false);
                     workRemaining = cfg.PostponeMinutes * 60;
+                    // 久坐时钟必须一起重置：EndRest(false) 故意不调 ResetWork，
+                    // 此时 sedRemaining 还停在 0，下一秒 tick 会立刻再次 BeginRest(true)，
+                    // 「推迟」就成了"推迟 5 分钟后马上又弹活动遮罩"的死循环。
+                    sedRemaining = cfg.SedentaryEnabled ? cfg.SedentaryMinutes * 60 : 0;
                     UpdateTrayText();
                 };
                 restForms.Add(f);
@@ -2087,8 +2342,13 @@ namespace EyeLite
                 else if (IsIdleTooLong()) s = "检测到离开，计时已暂停";
                 else
                 {
-                    s = "工作剩余 " + (workRemaining / 60) + ":" + (workRemaining % 60).ToString("00")
-                        + (cfg.PomodoroEnabled ? " · 番茄钟" : "");
+                    // 番茄钟标记放在最前面（一眼就能看出当前用的是哪套节奏），
+                    // 久坐剩余挂在后面（活动 " + mm:ss），格式与护眼剩余一致。
+                    s = (cfg.PomodoroEnabled ? "番茄钟 · " : "")
+                        + "工作剩余 " + (workRemaining / 60) + ":" + (workRemaining % 60).ToString("00")
+                        + (cfg.SedentaryEnabled
+                            ? " · 活动 " + (sedRemaining / 60) + ":" + (sedRemaining % 60).ToString("00")
+                            : "");
                 }
                 tray.Text = s;
             }
@@ -2267,6 +2527,9 @@ namespace EyeLite
         [STAThread]
         private static void Main()
         {
+            // 必须是第一条语句：晚于任何 System.Drawing 初始化，GDI+ 会永久缓存误判的 DPI
+            try { SetProcessDPIAware(); } catch { }
+
             bool createdNew = false;
             using (System.Threading.Mutex mutex =
                    new System.Threading.Mutex(true, "EyeLite_SingleInstance_v1", out createdNew))
@@ -2277,8 +2540,6 @@ namespace EyeLite
                                     "护眼小助手", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
-
-                try { SetProcessDPIAware(); } catch { }
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
