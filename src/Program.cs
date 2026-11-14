@@ -38,6 +38,12 @@ namespace EyeLite
         public static readonly Color RingTrack = Color.FromArgb(0x1E, 0x27, 0x33);    // #1E2733
         public static readonly Color RingLabel = Color.FromArgb(0x5F, 0x70, 0x85);    // #5F7085
         public static readonly Color Accent = Color.FromArgb(0x5F, 0xD3, 0xA6);       // #5FD3A6
+
+        // ---- 番茄钟休息是一套暖橙配色（只换颜色，不换任何尺寸）----
+        public static readonly Color AccentPomodoro = Color.FromArgb(0xF2, 0x81, 0x5C);    // #F2815C
+        public static readonly Color RingTrackPomodoro = Color.FromArgb(0x3A, 0x2A, 0x22); // #3A2A22
+        public static readonly Color RingLabelPomodoro = Color.FromArgb(0x8A, 0x6A, 0x5A); // #8A6A5A
+
         public static readonly Color EyebrowText = Color.FromArgb(0x6B, 0x7F, 0x96);  // #6B7F96（遮罩眉标，原 #4E5C70 太暗）
         public static readonly Color HintText = Color.FromArgb(0x8F, 0xA6, 0xC0);     // #8FA6C0
         public static readonly Color DarkTipText = Color.FromArgb(0x46, 0x53, 0x6A);  // #46536A
@@ -243,7 +249,7 @@ namespace EyeLite
         private readonly int radius;
         private readonly Color normalBack;
         private readonly Color hoverBack;
-        private readonly Pen borderPen;     // null 表示无边框
+        private Pen borderPen;              // null 表示无边框；SetBorderColor 会替换它
         private GraphicsPath path;
         private Size pathSize = Size.Empty;
 
@@ -306,6 +312,21 @@ namespace EyeLite
         {
             base.OnMouseEnter(e);
             this.BackColor = hoverBack;
+        }
+
+        /// <summary>
+        /// 运行时换边框色（番茄钟换暖橙）。只在每次开始休息时调一次，
+        /// 不在每秒 tick 路径上，所以这里新建一个 Pen 是可接受的。
+        /// </summary>
+        public void SetBorderColor(Color c)
+        {
+            if (borderPen == null) return;          // 无边框按钮（如「保存」）不处理
+            if (borderPen.Color == c) return;
+
+            Pen old = borderPen;
+            borderPen = new Pen(c, old.Width);
+            old.Dispose();
+            this.Invalidate();
         }
 
         protected override void OnMouseLeave(EventArgs e)
@@ -584,8 +605,16 @@ namespace EyeLite
                     // 顺序错了就会出现"严格模式下按 Esc 被吞掉、却什么都不发生"。
                     if (isDown)
                     {
+                        // Esc 与空格都必须"无修饰键"才算跳过。
+                        // 否则 Ctrl+Space（中文输入法中英切换）和 Alt+Space（窗口系统菜单）
+                        // 会在用户想干别的事时顺手把休息结束掉。
+                        //
+                        // 注：严格模式下这两个组合会被下面的"全吞"吞掉，也就是说
+                        // 休息期间输入法切换同样失效。这是刻意的（休息就该离开键盘），
+                        // 不是 bug，别"修"。
                         bool plainEsc = (vk == VK_ESCAPE) && !Down(VK_CONTROL) && !Down(VK_MENU);
-                        if (plainEsc || vk == VK_SPACE)
+                        bool plainSpace = (vk == VK_SPACE) && !Down(VK_CONTROL) && !Down(VK_MENU);
+                        if (plainEsc || plainSpace)
                         {
                             Action cb = OnSkipKey;
                             if (cb != null)
@@ -726,7 +755,10 @@ namespace EyeLite
 
         private Label lblEyebrow;   // 「休息一下」/「番茄钟休息」
         private Label lblHint;
+        private Label lblTip;       // 副提示：护眼 / 番茄钟两套文案
         private RingMeter ring;     // 环 + 环心数字，单一视觉单元
+        private RoundButton btnSkip; // 需要运行时换边框色（番茄钟暖橙）
+        private bool isPomodoro;    // 当前是番茄钟休息（只影响颜色与文案，不影响任何尺寸）
 
         // 构造期建好、整个窗体生命周期复用；Dispose(bool) 里释放
         private LinearGradientBrush bgBrush;
@@ -891,7 +923,7 @@ namespace EyeLite
             lblHint.SetBounds(0, yHint, w, hintH);
             this.Controls.Add(lblHint);
 
-            Label lblTip = new Label();
+            lblTip = new Label();
             lblTip.Text = "眨眼 · 远眺 · 深呼吸";
             lblTip.ForeColor = Ui.DarkTipText;
             lblTip.Font = Ui.FontTip;
@@ -906,9 +938,9 @@ namespace EyeLite
                 // 跳过 Sc(176) + 间距 Sc(16) + 推迟 Sc(150)，整体水平居中
                 // 描边宽度随 DPI 缩放，否则 150% 下 1px 细得像没画
                 int bw = Math.Max(1, Sc(1));
-                RoundButton btnSkip = new RoundButton("跳过 (Esc/空格)", Sc(21),
-                                                      Ui.DarkBtnBg, Ui.DarkBtnHover,
-                                                      Ui.SkipText, Ui.Accent, bw);
+                btnSkip = new RoundButton("跳过 (Esc/空格)", Sc(21),
+                                          Ui.DarkBtnBg, Ui.DarkBtnHover,
+                                          Ui.SkipText, Ui.Accent, bw);
                 btnSkip.Font = Ui.FontRowLabel;
                 btnSkip.SetBounds(w / 2 - Sc(184), yBtn, Sc(176), btnH);
                 btnSkip.Click += delegate
@@ -1030,6 +1062,28 @@ namespace EyeLite
             if (lblHint != null) lblHint.Text = hint;
         }
 
+        /// <summary>
+        /// 切换「护眼 / 番茄钟」两套配色与副提示文案。
+        /// 只换颜色和文字，绝不碰任何尺寸，所以布局与居中计算完全不受影响。
+        /// 由 TrayApp.BeginRest 在每次休息开始时调用一次（不在 tick 路径）。
+        /// </summary>
+        public void SetPomodoro(bool on)
+        {
+            this.isPomodoro = on;
+
+            if (ring != null) ring.SetPomodoro(isPomodoro);
+
+            if (lblTip != null)
+            {
+                lblTip.Text = isPomodoro ? "走动 · 喝水 · 看远处" : "眨眼 · 远眺 · 深呼吸";
+            }
+
+            if (btnSkip != null)
+            {
+                btnSkip.SetBorderColor(isPomodoro ? Ui.AccentPomodoro : Ui.Accent);
+            }
+        }
+
         public void UpdateView(int remaining, int total)
         {
             if (remaining < 0) remaining = 0;
@@ -1083,12 +1137,16 @@ namespace EyeLite
         }
 
         // ------------------------------------------------------------
-        // 环形进度面板：Pen 构造期建一次，每秒只改两个 int + Invalidate
+        // 环形进度面板：4 个 Pen 全部构造期建好（护眼/番茄各一组），
+        // 每秒只改两个 int + Invalidate，tick 路径零 GDI 新建。
         // ------------------------------------------------------------
         private class RingMeter : Panel
         {
             private readonly Pen trackPen;
             private readonly Pen progPen;
+            private readonly Pen trackPenPomo;    // 番茄钟暖灰底环
+            private readonly Pen progPenPomo;     // 番茄钟暖橙进度弧
+            private bool pomodoroMode;            // false = 护眼（默认）
             private readonly float lineWidth;
             private readonly int diameter;
             private readonly float dpiScale;
@@ -1133,6 +1191,20 @@ namespace EyeLite
                 progPen = new Pen(Ui.Accent, lineWidth + 1f);
                 progPen.StartCap = LineCap.Round;
                 progPen.EndCap = LineCap.Round;
+
+                // 番茄钟一套暖橙，线宽算法与护眼组完全一致（尺寸不变，只换颜色）
+                trackPenPomo = new Pen(Ui.RingTrackPomodoro, lineWidth);
+                progPenPomo = new Pen(Ui.AccentPomodoro, lineWidth + 1f);
+                progPenPomo.StartCap = LineCap.Round;
+                progPenPomo.EndCap = LineCap.Round;
+            }
+
+            /// <summary>切换护眼 / 番茄钟配色。只换画笔选择 + 一次重绘，不新建任何 GDI。</summary>
+            public void SetPomodoro(bool on)
+            {
+                if (pomodoroMode == on) return;
+                pomodoroMode = on;
+                this.Invalidate();
             }
 
             private int Sc(int px)
@@ -1228,13 +1300,18 @@ namespace EyeLite
                 if (ringSize <= 8) return;
 
                 Rectangle trackRect = new Rectangle(inset, inset, ringSize, ringSize);
-                g.DrawEllipse(trackPen, trackRect);
+
+                // 按模式选画笔：两组 Pen 都是构造期建好的，这里只是取引用，零新建
+                Pen useTrack = pomodoroMode ? trackPenPomo : trackPen;
+                Pen useProg = pomodoroMode ? progPenPomo : progPen;
+
+                g.DrawEllipse(useTrack, trackRect);
 
                 if (total > 0 && remaining > 0)
                 {
                     float sweep = 359.9f * (float)remaining / (float)total;
                     if (sweep > 359.9f) sweep = 359.9f;   // GDI+ 画 360° 会退化成空白
-                    if (sweep > 0f) g.DrawArc(progPen, trackRect, -90f, sweep);
+                    if (sweep > 0f) g.DrawArc(useProg, trackRect, -90f, sweep);
                 }
 
                 // ---- 环心：数字（Consolas 等宽）+ 语义小字 ----
@@ -1250,7 +1327,8 @@ namespace EyeLite
                     TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
 
                 Rectangle labelRect = new Rectangle(textX, textY + textH, textW, Sc(22));
-                TextRenderer.DrawText(g, "剩余", Ui.FontRingLabel, labelRect, Ui.RingLabel,
+                Color useLabel = pomodoroMode ? Ui.RingLabelPomodoro : Ui.RingLabel;
+                TextRenderer.DrawText(g, "剩余", Ui.FontRingLabel, labelRect, useLabel,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.Top |
                     TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
             }
@@ -1259,8 +1337,11 @@ namespace EyeLite
             {
                 if (disposing)
                 {
+                    // 四个 Pen 全部在这里释放（护眼组 + 番茄钟组）
                     trackPen.Dispose();
                     progPen.Dispose();
+                    trackPenPomo.Dispose();
+                    progPenPomo.Dispose();
                     // backdropBrush / glowBrush 是借用，不在这里释放
                     backdropBrush = null;
                     glowBrush = null;
@@ -1650,15 +1731,18 @@ namespace EyeLite
 
             EnsureRestForms();
 
-            string eyebrow = cfg.PomodoroEnabled ? "番茄钟休息" : "休息一下";
-            string hint = cfg.PomodoroEnabled
-                ? "番茄钟休息中，等一下继续"
+            bool pomo = cfg.PomodoroEnabled;
+            string eyebrow = pomo ? "番茄钟休息" : "休息一下";
+            string hint = pomo
+                ? "这一轮专注结束了，起身活动一下"
                 : "让眼睛看看 6 米外的东西，放松睫状肌";
 
             for (int i = 0; i < restForms.Count; i++)
             {
-                restForms[i].SetHint(eyebrow, hint);
-                restForms[i].ShowRest();
+                RestForm f = restForms[i];
+                f.SetPomodoro(pomo);          // 必须在 SetHint / ShowRest 之前（换配色与副提示）
+                f.SetHint(eyebrow, hint);
+                f.ShowRest();
             }
 
             tray.Icon = iconRest;
