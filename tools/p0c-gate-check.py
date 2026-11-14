@@ -82,8 +82,19 @@ def eyelite_pid():
 
 
 def _own_windows():
-    pids = set(eyelite_pid())
+    """EyeLite 自己的可见窗口。
+
+    PID 用**缓存**：tasklist 每次要 0.3~1 秒，在 0.15 秒的轮询间隔里
+    会把观测节奏拖垮，导致"遮罩明明在，脚本却说没有"。
+    """
+    pids = set(_pid_cache)
+    if not pids:
+        pids = set(eyelite_pid())
+        _pid_cache.update(pids)
     return [t for t in list_windows() if t[3] in pids]
+
+
+_pid_cache = set()
 
 
 def preview_windows():
@@ -101,6 +112,7 @@ def stop_eyelite():
     subprocess.run(['taskkill', '/im', 'EyeLite.exe', '/f'],
                    capture_output=True)
     time.sleep(1.5)
+    _pid_cache.clear()
 
 
 def read_cfg():
@@ -147,8 +159,11 @@ def launch(quns=None, env_extra=None):
         env['EYE_LITE_FORCE_QUNS'] = str(quns)
     if env_extra:
         env.update(env_extra)
-    subprocess.Popen([EXE], env=env,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen([EXE], env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # PID 直接从子进程拿，不必回头调 tasklist（慢）。
+    _pid_cache.add(proc.pid)
+    return proc
 
 
 def wait_for_overlay(timeout_s):
@@ -229,7 +244,7 @@ def main():
                 if first_overlay is None and overlay_windows():
                     first_overlay = time.time() - t0
                     break
-                time.sleep(0.15)
+                time.sleep(0.05)
 
             got_overlay = first_overlay is not None
             got_preview = first_preview is not None
