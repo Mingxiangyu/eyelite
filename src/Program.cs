@@ -939,6 +939,130 @@ namespace EyeLite
     }
 
     // ================================================================
+    // 3.6 系统通知状态探测（P0-C：FullscreenDndGate）
+    // ================================================================
+    //
+    // 契约 §10.1：FullscreenDndGate 进核心代码 —— **可配置 ≠ 可卸载**。
+    // 关掉它，探测代码仍在包里，只是不再抑制（有人在投屏时就是想被弹）。
+    //
+    // ---- 为什么只有一部分 QUNS 状态算抑制源 ----
+    //
+    // 2026-11-14 本机实测（tools/p0c-quns-probe.py，连采 3 次）：
+    //   HRESULT = 0，QUNS **恒为 5 = QUNS_QUIET_TIME**；
+    //   注册表无 HKCU\...\FocusAssist 项 → 是 Win11 系统级免打扰常开，不是用户手动开的。
+    //
+    // 所以「把 QUNS_QUIET_TIME 当硬抑制源」在本机等于**EyeLite 永远不提醒**——
+    // 产品直接变成坏掉的版本。它们的语义是"系统不弹通知"，
+    // 而 EyeLite 是用户主动装的护眼工具，语义不同：只用来做诊断文案，不用来抑制。
+    //
+    // 硬抑制源（真的会被全屏 / 演示打断）：
+    //   QUNS_BUSY(1) / QUNS_USING_D3D_FULL_SCREEN(2) / QUNS_PRESENTATION_MODE(3)
+    //   / QUNS_RUNNING_D3D_FULL_SCREEN(4)
+    internal enum QunsState
+    {
+        NotForcedOn = 0,
+        Busy = 1,
+        UsingD3DFullScreen = 2,
+        PresentationMode = 3,
+        RunningD3DFullScreen = 4,
+        QuietTime = 5,
+        BusyDnd = 6
+    }
+
+    internal static class NotificationState
+    {
+        [DllImport("shell32.dll", CharSet = CharSet.Auto)]
+        private static extern int SHQueryUserNotificationState(out uint pnqs);
+
+        // 轮询缓存 3 秒：跃迁点最多延迟 3 秒感知全屏状态，
+        // 而到点前还有预告窗口（P0-B），这个精度绰绰有余。
+        private const long PollIntervalMs = 3000;
+        private static readonly object gateObj = new object();
+        private static QunsState cached = QunsState.NotForcedOn;
+        private static long cachedAtMs = 0;
+        private static bool cacheValid = false;
+
+        // 测试钩子（自动化实测用）：环境变量 EYE_LITE_FORCE_QUNS 设为 0..6 可强制状态。
+        // 未设置时走真实 API。留在发布版里无害 —— 必须显式设环境变量才会生效。
+        private static readonly int forced = ReadForced();
+
+        private static int ReadForced()
+        {
+            try
+            {
+                string s = Environment.GetEnvironmentVariable("EYE_LITE_FORCE_QUNS");
+                if (string.IsNullOrEmpty(s)) return -1;
+                int v;
+                if (!int.TryParse(s, out v)) return -1;
+                if (v < 0 || v > 6) return -1;
+                return v;
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>
+        /// 读当前系统通知状态。失败时返回上一次的值（首次为 NotForcedOn）——
+        /// **fail-open**：探测失败宁可照常提醒，也不能让用户悄悄失去所有提醒。
+        /// </summary>
+        public static QunsState Query()
+        {
+            if (forced >= 0) return (QunsState)forced;
+
+            try
+            {
+                lock (gateObj)
+                {
+                    long now = Clock.NowMs();
+                    if (cacheValid && (now - cachedAtMs) < PollIntervalMs) return cached;
+
+                    uint v = 0;
+                    int hr = SHQueryUserNotificationState(out v);
+                    if (hr != 0) return cached;        // 失败：保持旧值
+                    cached = (QunsState)v;
+                    cachedAtMs = now;
+                    cacheValid = true;
+                    return cached;
+                }
+            }
+            catch { return cached; }
+        }
+
+        /// <summary>该状态是否构成"硬抑制"（全屏 / 演示中）。</summary>
+        public static bool IsBlocking(QunsState s)
+        {
+            switch (s)
+            {
+                case QunsState.Busy:
+                case QunsState.UsingD3DFullScreen:
+                case QunsState.PresentationMode:
+                case QunsState.RunningD3DFullScreen:
+                    return true;
+                default:
+                    return false;   // QuietTime / BusyDnd 明确**不**抑制，理由见类注释
+            }
+        }
+
+        /// <summary>托盘提示用的简短原因文案（NotifyIcon.Text 上限 63 字符，必须短）。</summary>
+        public static string ReasonText(QunsState s)
+        {
+            switch (s)
+            {
+                case QunsState.Busy:
+                case QunsState.UsingD3DFullScreen:
+                case QunsState.RunningD3DFullScreen:
+                    return "全屏中，提醒暂缓";
+                case QunsState.PresentationMode:
+                    return "演示中，提醒暂缓";
+                case QunsState.QuietTime:
+                case QunsState.BusyDnd:
+                    return "系统免打扰中，提醒照常";
+                default:
+                    return "";
+            }
+        }
+    }
+
+    // ================================================================
     // 4. 配置
     // ================================================================
     internal class AppConfig
@@ -952,7 +1076,18 @@ namespace EyeLite
         public int PostponeMinutes = 5;
         public int IdleMinutes = 3;
         public bool SoundEnabled = true;
-        public bool StrictMode = true;
+
+        // P0-E：严格模式**默认关闭**。
+        //
+        // 为什么默认关：严格模式在休息期间会吞掉**整个键盘**，用户一旦触发休息，
+        // 正在打的字就全部丢失；更糟的是如果触发休息时物理键正卡住（Ctrl 之类），
+        // 钩子的 drain 机制会持续吞这个键的 repeat，用户感觉是"Ctrl 一直卡住"。
+        // 这类"锁键盘"代价远大于"少一次休息提醒"的收益，所以默认档必须是安全的：
+        // 只吞 Esc / 空格作为跳过出口，其余键照常输入。
+        //
+        // 注意：这里只改**默认值**。用户显式写过 StrictMode=1 的旧配置依然生效
+        // （Load 里 "v == 1" 的语义不变）—— 不擅自推翻用户自己的选择。
+        public bool StrictMode = false;
         public bool StartWithWindows = false;
 
         // 到点前多少秒出预告横幅（0 = 不预告，直接全屏遮罩）。
@@ -967,6 +1102,11 @@ namespace EyeLite
 
         // G14 预留：摄像头姿态计数（v1.2）。当前无实现类，开关在设置页被禁用。
         public bool CameraCountEnabled = false;
+
+        // P0-C：系统通知状态闸门（FullscreenDndGate）。
+        // 契约 §10.1「可配置 ≠ 可卸载」：代码恒在包里，这个开关只决定**要不要抑制**。
+        // 默认开 —— 全屏/演示时弹遮罩是最典型的"错误时机打扰"（调研文档第一段的用户原话）。
+        public bool SuppressOnFullscreen = true;
 
         public static string ConfigDir
         {
@@ -1016,6 +1156,7 @@ namespace EyeLite
                         case "SedentaryMinutes": c.SedentaryMinutes = Clamp(v, 45, 15, 180); break;
                         case "SedentarySeconds": c.SedentarySeconds = Clamp(v, 120, 30, 300); break;
                         case "CameraCountEnabled": c.CameraCountEnabled = v == "1"; break;
+                        case "SuppressOnFullscreen": c.SuppressOnFullscreen = v == "1"; break;
                     }
                 }
             }
@@ -1051,11 +1192,12 @@ namespace EyeLite
                 sb.AppendLine("SoundEnabled=" + (SoundEnabled ? "1" : "0"));
                 sb.AppendLine("StrictMode=" + (StrictMode ? "1" : "0"));
                 sb.AppendLine("StartWithWindows=" + (StartWithWindows ? "1" : "0"));
-            sb.AppendLine("PreviewSeconds=" + PreviewSeconds);
+                sb.AppendLine("PreviewSeconds=" + PreviewSeconds);
                 sb.AppendLine("SedentaryEnabled=" + (SedentaryEnabled ? "1" : "0"));
                 sb.AppendLine("SedentaryMinutes=" + SedentaryMinutes);
                 sb.AppendLine("SedentarySeconds=" + SedentarySeconds);
                 sb.AppendLine("CameraCountEnabled=" + (CameraCountEnabled ? "1" : "0"));
+                sb.AppendLine("SuppressOnFullscreen=" + (SuppressOnFullscreen ? "1" : "0"));
                 File.WriteAllText(ConfigPath, sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -1939,14 +2081,15 @@ namespace EyeLite
     {
         private NumericUpDown numWork, numRest, numPomoWork, numPomoRest,
                               numSedMinutes, numSedSeconds, numPostpone, numIdle, numPreview;
-        private CheckBox chkPomodoro, chkSedentary, chkAllowSkip, chkSound, chkStrict, chkAutoStart;
+        private CheckBox chkPomodoro, chkSedentary, chkAllowSkip, chkSound, chkStrict, chkAutoStart,
+                          chkSuppressFullscreen;
 
         // 版式常量（以下全部是 96dpi 下的设计值，运行时一律经 Sc() 乘 DPI 因子）
-        // 设计基准客户区 520 x 920：
+        // 设计基准客户区 520 x 952：
         //   88(页头) + 144(节奏，3 行) + 16 + 144(番茄钟) + 16 + 144(久坐与活动) + 16
-        //   + 272(行为，7 行) + 24 + 38(按钮) + 18(底部留白) = 920
+        //   + 304(行为，8 行) + 24 + 38(按钮) + 18(底部留白) = 952
         private const int FormW = 520;
-        private const int FormH = 920;
+        private const int FormH = 952;
         private const int CardLeft = 24;
         private const int CardWidth = 472;      // 520 - 24 * 2
         private const int CardPad = 22;         // 卡片左右内边距
@@ -2080,24 +2223,29 @@ namespace EyeLite
             numSedSeconds = AddRow(cardSed, Sc(FirstRowTop) + Sc(RowHeight) * 2, "活动时长（秒）", 30, 300, cfg.SedentarySeconds);
             y += Sc(144) + Sc(Gap);
 
-            // ---------- 卡片 4：行为（7 行）----------
-            RoundPanel card3 = AddCard(y, Sc(272), "行为");
+            // ---------- 卡片 4：行为（8 行）----------
+            RoundPanel card3 = AddCard(y, Sc(304), "行为");
             chkAllowSkip = AddCheck(card3, Sc(FirstRowTop), "允许跳过 / 推迟休息", cfg.AllowSkip);
             numPostpone = AddRow(card3, Sc(FirstRowTop) + Sc(RowHeight), "推迟时长（分钟）", 1, 60, cfg.PostponeMinutes);
             numIdle = AddRow(card3, Sc(FirstRowTop) + Sc(RowHeight) * 2, "离开多少分钟后暂停计时", 0, 120, cfg.IdleMinutes);
             chkSound = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 3, "开始 / 结束都播放提示音", cfg.SoundEnabled);
             chkStrict = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 4,
-                                 "严格模式：休息时屏蔽整个键盘（Esc / 空格可跳过）", cfg.StrictMode);
-            chkAutoStart = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 5,
+                                 "严格模式：休息期间锁住键盘，Esc / 空格退出（会中断输入）", cfg.StrictMode);
+            // P0-C：系统状态闸门（FullscreenDndGate）。
+            // 文案里写清"只拦全屏 / 演示"：Win11 的系统免打扰（QUNS_QUIET_TIME）
+            // 在很多机器上是常开的，把它也算进去会让本工具等于永不提醒。
+            chkSuppressFullscreen = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 5,
+                                 "全屏 / 演示时暂缓提醒（最多暂缓 30 分钟）", cfg.SuppressOnFullscreen);
+            chkAutoStart = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 6,
                                     "开机自动启动", cfg.StartWithWindows);
             // G14 预留：只放一个禁用的开关占位，**不写回配置**（cfg.CameraCountEnabled 保持原值），
             // 避免用户以为勾上就生效。v1.2 有了 CameraBodyCounter 再解禁并接 IBodyCounter。
             // 用局部变量而不是字段：没有读取方，留字段只会多一个"永远用不到"的状态位。
-            CheckBox chkCamera = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 6, "摄像头计数（暂未开放）", false);
+            CheckBox chkCamera = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 7, "摄像头计数（暂未开放）", false);
             chkCamera.Enabled = false;
 
             // ---------- 底部按钮：最后一排卡片底部 + Sc(24) ----------
-            int btnY = y + Sc(272) + Sc(24);
+            int btnY = y + Sc(304) + Sc(24);
 
             RoundButton ok = new RoundButton("保存", Sc(8), Ui.PrimaryBg, Ui.PrimaryHover,
                                              Color.White, Color.Empty, 0);
@@ -2128,14 +2276,18 @@ namespace EyeLite
         /// <summary>
         /// 严格模式的说明文字随「允许跳过」联动。
         /// 构造期间控件可能还没建好，必须判空。
+        ///
+        /// 文案原则（P0-E）：必须让用户**一眼明白后果**。
+        /// "屏蔽整个键盘"听起来像个开关描述，"锁住键盘…会中断输入"才说清了代价 ——
+        /// 用户反馈过"Ctrl 一直卡住"，那就别让任何人稀里糊涂地打开它。
         /// </summary>
         private void UpdateStrictText()
         {
             if (chkStrict == null || chkAllowSkip == null) return;
 
             chkStrict.Text = chkAllowSkip.Checked
-                ? "严格模式：休息时屏蔽整个键盘（Esc / 空格可跳过）"
-                : "严格模式：休息时只拦系统键（键盘仍可用）";
+                ? "严格模式：休息期间锁住键盘，Esc / 空格退出（会中断输入）"
+                : "严格模式：休息期间只拦系统键，键盘仍可用（不影响输入）";
         }
 
         private RoundPanel AddCard(int top, int height, string title)
@@ -2229,6 +2381,7 @@ namespace EyeLite
             cfg.PostponeMinutes = (int)numPostpone.Value;
             cfg.IdleMinutes = (int)numIdle.Value;
             cfg.PreviewSeconds = (int)numPreview.Value;
+            cfg.SuppressOnFullscreen = chkSuppressFullscreen.Checked;
             cfg.SoundEnabled = chkSound.Checked;
             cfg.StrictMode = chkStrict.Checked;
             cfg.StartWithWindows = chkAutoStart.Checked;
@@ -2293,6 +2446,18 @@ namespace EyeLite
 
         // 休息开始时的前台窗口；休息结束若发现前台被我们占了就还回去（安全网）
         private IntPtr savedForeground = IntPtr.Zero;
+
+        // ---- P0-C：系统通知状态闸门（FullscreenDndGate）----
+        //
+        // 契约 §9：gate **只在"即将开始"这个跃迁点求值**，休息已开始后绝不评估。
+        // 契约 §10.1：gate 进核心，可开关不可卸载（cfg.SuppressOnFullscreen）。
+        //
+        // 抑制期间累加器**继续走**：被抑制的这段时间不该从账本里消失，
+        // 解除抑制后到点立刻提醒（该补的护眼时长不会丢）。
+        private bool isSuppressed = false;      // 当前是否被全屏/演示抑制
+        private long suppressedSinceMs = 0;     // 本次抑制开始时刻
+        private long suppressNoticeAtMs = 0;    // 下次弹「已暂缓」横幅的时刻
+        private QunsState currentQuns = QunsState.NotForcedOn;
 
         private List<RestForm> restForms = new List<RestForm>();
         private string screenSignature = "";
@@ -2526,6 +2691,50 @@ namespace EyeLite
                     bool sedDue = cfg.SedentaryEnabled && sedLimitMs > 0 && sedAccumMs >= sedLimitMs;
                     bool workDue = workLimitMs > 0 && workAccumMs >= workLimitMs;
 
+                    // ---- P0-C：系统通知状态闸门（FullscreenDndGate）----
+                    //
+                    // 契约 §9：gate 只在"即将开始休息"这个跃迁点求值。
+                    // 注意分支顺序：**必须先判 isResting / isPreviewing 再判到点**，
+                    // 休息已开始后 gate 状态怎么变都不许撤遮罩、都不许延长休息。
+                    //
+                    // 这里求值的位置在"到点判定之前"：抑制期间累加器继续走，
+                    // 但**不弹预告也不弹遮罩**（预览也要一起压住，否则横幅会闪一下）。
+                    bool blocked = false;
+                    if (cfg.SuppressOnFullscreen)
+                    {
+                        currentQuns = NotificationState.Query();
+                        blocked = NotificationState.IsBlocking(currentQuns);
+                    }
+                    else
+                    {
+                        currentQuns = QunsState.NotForcedOn;
+                    }
+
+                    if (blocked)
+                    {
+                        // 被抑制：保持原有计时状态，只是不提醒。
+                        // 首次进入抑制时收掉预告横幅（不能预告着然后又不提醒）。
+                        if (!isSuppressed)
+                        {
+                            isSuppressed = true;
+                            suppressedSinceMs = now;
+                            suppressNoticeAtMs = now;
+                            if (isPreviewing) EndPreview();
+                        }
+                        HandleSuppressedTick(now, sedDue || workDue);
+                        RefreshRemaining();
+                        UpdateTrayText();
+                        return;
+                    }
+
+                    if (isSuppressed)
+                    {
+                        // 抑制解除：不需要任何"补弹"，因为累加器一直在走，
+                        // 下面正常的到点判定会立刻决定要不要弹。
+                        isSuppressed = false;
+                        suppressedSinceMs = 0;
+                    }
+
                     // ---- 预告窗口（P0-B）----
                     // 到点前 PreviewSeconds 秒，横幅出现给三出口。
                     // 判定用**剩余时间**而不是绝对时刻：剩余时间进入 [0, 预览窗口] 即进预告。
@@ -2605,6 +2814,49 @@ namespace EyeLite
                 catch { }
                 try { tray.Icon = iconIdle; } catch { }
                 try { ResetWork(); } catch { }
+            }
+        }
+
+                /// <summary>
+        /// 被系统状态抑制期间的处理（每 tick 调一次）。
+        ///
+        /// 三条原则：
+        ///   1. **不打扰**：不弹预告、不弹遮罩、不出声、不装钩子。
+        ///   2. **不丢账**：累加器继续走（在调用方已经累加过了），解除后立刻能到点。
+        ///   3. **不让用户以为程序坏了**：最多每 5 分钟给一条托盘气泡，
+        ///      说明"因全屏/演示暂缓"，并告知到点已过。
+        ///      气泡是 NotifyIcon.ShowBalloonTip —— 不抢焦点、不抢输入。
+        /// </summary>
+        private void HandleSuppressedTick(long now, bool dueNow)
+        {
+            // 抑制期最长 30 分钟：超过就强制放行一次。
+            // 理由：全屏状态可能一直查不到（例如某些独占全屏程序不更新通知状态），
+            // 没有这个上限 EyeLite 会变成"永远不提醒"，那比误打扰更糟。
+            const long maxSuppressMs = 30L * 60L * 1000L;
+            if (now - suppressedSinceMs >= maxSuppressMs)
+            {
+                isSuppressed = false;
+                suppressedSinceMs = 0;
+                try
+                {
+                    tray.ShowBalloonTip(4000, "护眼小助手",
+                        "全屏 / 演示状态持续过久，已强制提醒一次。", ToolTipIcon.Info);
+                }
+                catch { }
+                return;
+            }
+
+            // 到点了但被压住 → 给用户一条明确告知（最多每 5 分钟一条）
+            if (dueNow && now - suppressNoticeAtMs >= 5L * 60L * 1000L)
+            {
+                suppressNoticeAtMs = now;
+                string reason = NotificationState.ReasonText(currentQuns);
+                try
+                {
+                    tray.ShowBalloonTip(4000, "护眼小助手",
+                        reason + "，到了休息时间，解除后立即提醒。", ToolTipIcon.Info);
+                }
+                catch { }
             }
         }
 
@@ -2774,6 +3026,10 @@ namespace EyeLite
             catch { savedForeground = IntPtr.Zero; }
 
             isResting = true;
+            // 手动"立即休息"是用户主动行为，必须覆盖任何抑制状态。
+            // 抑制状态在这里清掉，休息期间不再评估 gate（契约 §9）。
+            isSuppressed = false;
+            suppressedSinceMs = 0;
             restTotalSeconds = bodyBreak ? cfg.SedentarySeconds : RestTotalSeconds;
             restDueMs = Clock.NowMs() + (long)restTotalSeconds * 1000L;
             restRemaining = restTotalSeconds;
@@ -2811,14 +3067,19 @@ namespace EyeLite
             //
             //   AllowSkip | StrictMode | 结果
             //   ----------+------------+----------------------------------------------
-            //   true      | true       | 全吞键盘，Esc/空格可跳过（默认组合）
-            //   true      | false      | 只吞 Esc/空格（用于跳过），其余键照常输入
+            //   true      | true       | 全吞键盘，Esc/空格可跳过
+            //   true      | false      | 只吞 Esc/空格（用于跳过），其余键照常输入  ← P0-E 默认档
             //   false     | true       | 只吞 Win/Tab/Alt+F4/Ctrl+Esc，其余照常
             //   false     | false      | 不装钩子，零开销
             //
             // blockAll 只在"有跳过出口"（AllowSkip=true）时才开：
             // AllowSkip=false 时若也全吞键盘，用户既不能跳过也不能打字，
             // 只剩 Ctrl+Alt+Del 一条路，太危险。
+            //
+            // P0-E：StrictMode 默认改为 false，所以默认组合是
+            // 「AllowSkip=true + StrictMode=false」→ blockAll=false，
+            // 钩子只吞 Esc/空格作为跳过出口，**其余按键一律照常送达用户程序**。
+            // 这是"不影响用户输入"这条硬要求的落点：默认档下不存在任何全吞路径。
             bool needHook = cfg.AllowSkip || cfg.StrictMode;
             if (needHook)
             {
@@ -2967,6 +3228,13 @@ namespace EyeLite
                 if (paused) s = "已暂停 · 右键可恢复";
                 else if (isResting) s = "休息中 " + restRemaining + " 秒";
                 else if (isPreviewing) s = "即将休息 " + previewRemaining + " 秒";
+                else if (isSuppressed)
+                {
+                    // 抑制期间必须说清楚"为什么没提醒"，否则用户以为程序坏了。
+                    // 文案区分全屏与演示（NotifyIcon.Text 上限 63 字符，务必短）。
+                    string reason = NotificationState.ReasonText(currentQuns);
+                    s = reason.Length > 0 ? reason : "提醒暂缓中";
+                }
                 else if (IsIdleTooLong()) s = "检测到离开，计时已暂停";
                 else
                 {
