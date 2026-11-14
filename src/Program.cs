@@ -579,6 +579,31 @@ namespace EyeLite
             catch { }
         }
 
+        // ---- A5 仪式音：一个短"基音"，重复次数表达紧迫度 ----
+        //
+        // 为什么单音而不是旋律：重复次数本身就是信息（1 声放松 / 3 声已经拖了三轮），
+        // 音高固定才能让人"听一遍就认得"，不用再分神判断这是什么声音。
+        // 180ms 的短音是为了能被 220ms 的间隔干净切开，不糊成一片。
+        private static byte[] ritualWave = null;
+        private static GCHandle ritualHandle;
+
+        /// <summary>播一次仪式基音（D5，180ms）。合成与 pin 都只做一次，之后零分配。</summary>
+        public static void PlayRitualOnce()
+        {
+            try
+            {
+                if (!ritualHandle.IsAllocated)
+                {
+                    if (ritualWave == null) ritualWave = BuildWave(new double[] { 587.33 }, 180, 0.18);
+                    ritualHandle = GCHandle.Alloc(ritualWave, GCHandleType.Pinned);
+                }
+                if (!PlaySound(ritualHandle.AddrOfPinnedObject(), IntPtr.Zero,
+                               SND_MEMORY | SND_ASYNC | SND_NODEFAULT))
+                    System.Media.SystemSounds.Beep.Play();
+            }
+            catch { }
+        }
+
         /// <summary>
         /// 合成 16bit / 22050Hz 单声道 WAV。
         /// 音色：基频 + 0.22 倍二次谐波（补一点暖度，不做锯齿/方波）。
@@ -1110,6 +1135,1090 @@ namespace EyeLite
     }
 
     // ================================================================
+    // 3.9 插件骨架（进程内，不装 DLL、不装第三方）
+    // ================================================================
+    //
+    // 设计目标只有三条，全部围绕"常驻程序的成本"：
+    //   1. **未启用 = 不存在**：不 new、不注册定时器、不装钩子。配置里关着的时候，
+    //      这些插件对进程的影响必须是零字节、零句柄、零 tick。
+    //   2. **启用即延迟初始化**：第一次 Get() 时才 Factory() + OnEnable()，
+    //      所以启动路径上一个插件对象都不会被构造（首屏时间不受插件数量影响）。
+    //   3. **关闭即释放**：SetOn(id,false) / DisposeAll() 必须走 OnDisable 并把实例丢掉，
+    //      下次重新启用会重新构造 —— 不允许"关掉了但对象还挂着定时器"这种半死状态。
+    //
+    // 不做的事（明确记下来，避免以后被当成遗漏）：
+    //   · 不加载外部 DLL（无插件目录、无 Assembly.LoadFrom）——
+    //     那会把"零第三方依赖"这条硬约束撕开一个口子，也会引入一个可被替换的注入点。
+    //   · 不做插件间通信/依赖排序（当前 6 个插件彼此独立）。
+    internal interface IEyeLitePlugin
+    {
+        /// <summary>配置键后缀：对应 AppConfig.Plugin_&lt;Id&gt;。</summary>
+        string Id { get; }
+        string DisplayName { get; }
+        string Description { get; }
+        /// <summary>首次启用时调用一次。这里才允许建定时器 / 分配资源。</summary>
+        void OnEnable();
+        /// <summary>关闭时调用，必须释放 OnEnable 里拿到的一切。</summary>
+        void OnDisable();
+        bool IsEnabled { get; }
+    }
+
+    internal class PluginDescriptor
+    {
+        public string Id;
+        public string DisplayName;
+        public string Description;
+        /// <summary>null = 骨架里已占位但尚未实现（Get 会返回 null，不会崩）。</summary>
+        public Func<IEyeLitePlugin> Factory;
+        public IEyeLitePlugin Instance;
+    }
+
+    internal static class PluginHost
+    {
+        private static AppConfig cfg;
+
+        /// <summary>必须在 TrayApp 构造时先 Init，之后 IsOn / SetOn 才有配置可读。</summary>
+        public static void Init(AppConfig config)
+        {
+            cfg = config;
+        }
+
+        public static readonly List<PluginDescriptor> All = BuildAll();
+
+        private static List<PluginDescriptor> BuildAll()
+        {
+            List<PluginDescriptor> list = new List<PluginDescriptor>();
+
+            // A5：仪式音（已实现）
+            list.Add(new PluginDescriptor
+            {
+                Id = "Sound",
+                DisplayName = "仪式音",
+                Description = "预告出现时响一声「基音」，连续没休息会叠加到 2 声、3 声。",
+                Factory = delegate { return new RitualSoundPlugin(); }
+            });
+
+            // 以下 3 个在 P1 批 2 落地（Factory 从 null 换成真实现）。
+            list.Add(new PluginDescriptor
+            {
+                Id = "EdgeGlow",
+                DisplayName = "屏幕边缘微光",
+                Description = "休息前 60 秒在屏幕四边浮一层会呼吸的微光，比整屏压暗更轻。",
+                Factory = delegate { return new EdgeGlowPlugin(); }
+            });
+            list.Add(new PluginDescriptor
+            {
+                Id = "Ritual",
+                DisplayName = "休息仪式",
+                Description = "休息开始时弹一个小窗：眼神操（8 秒）与 4-7-8 呼吸交替。",
+                Factory = delegate { return new RitualPlugin(); }
+            });
+            list.Add(new PluginDescriptor
+            {
+                Id = "Stats",
+                DisplayName = "用眼统计",
+                Description = "记录完成 / 跳过 / 忽略的次数（只计数，不做健康判断）。",
+                Factory = delegate { return new StatsPlugin(); }
+            });
+
+            // 以下 2 个是 P1 后续批次的位置，先占位：Factory = null，Get() 恒返回 null。
+            list.Add(Placeholder("Movement", "起身计数", "统计每天的起身/活动次数。（未实现）"));
+            list.Add(Placeholder("Guard", "输入守卫", "休息期间对输入做更细的过滤策略。（未实现）"));
+
+            return list;
+        }
+
+        private static PluginDescriptor Placeholder(string id, string name, string desc)
+        {
+            PluginDescriptor d = new PluginDescriptor();
+            d.Id = id;
+            d.DisplayName = name;
+            d.Description = desc;
+            d.Factory = null;
+            return d;
+        }
+
+        private static PluginDescriptor Find(string id)
+        {
+            for (int i = 0; i < All.Count; i++)
+            {
+                if (All[i].Id == id) return All[i];
+            }
+            return null;
+        }
+
+        /// <summary>读配置里的开关。没有 cfg（忘了 Init）时按"关"处理，宁可少个功能也不要崩。</summary>
+        public static bool IsOn(string id)
+        {
+            if (cfg == null) return false;
+            return GetFlag(cfg, id);
+        }
+
+        /// <summary>
+        /// 取插件实例。未启用 / 未实现一律返回 null（调用方必须判空，这是"未启用不创建对象"的落点）。
+        /// 首次调用才 Factory() + OnEnable()。
+        /// </summary>
+        public static IEyeLitePlugin Get(string id)
+        {
+            PluginDescriptor d = Find(id);
+            if (d == null || d.Factory == null) return null;
+            if (!IsOn(id)) return null;
+            if (d.Instance != null) return d.Instance;
+
+            IEyeLitePlugin p = null;
+            try
+            {
+                p = d.Factory();
+                if (p != null) p.OnEnable();
+            }
+            catch
+            {
+                // 初始化失败就当没装：不留一个半初始化的实例在 All 里
+                if (p != null) { try { p.OnDisable(); } catch { } }
+                p = null;
+            }
+            d.Instance = p;
+            return d.Instance;
+        }
+
+        public static void SetOn(string id, bool on, AppConfig c)
+        {
+            if (c != null) SetFlag(c, id, on);
+
+            PluginDescriptor d = Find(id);
+            if (d == null) return;
+
+            if (!on && d.Instance != null)
+            {
+                try { d.Instance.OnDisable(); } catch { }
+                d.Instance = null;      // 关掉就丢引用，下次启用重新构造
+            }
+        }
+
+        /// <summary>退出 / 释放时调：所有已启用的插件走一遍 OnDisable 并丢引用。</summary>
+        public static void DisposeAll()
+        {
+            for (int i = 0; i < All.Count; i++)
+            {
+                PluginDescriptor d = All[i];
+                if (d == null || d.Instance == null) continue;
+                try { d.Instance.OnDisable(); } catch { }
+                d.Instance = null;
+            }
+        }
+
+        // 配置读写用显式 switch 而不是反射：字段就 6 个，switch 可读、可搜索、零分配，
+        // 也不会因为有人改名了字段而在运行时静默失效。
+        private static bool GetFlag(AppConfig c, string id)
+        {
+            switch (id)
+            {
+                case "Sound": return c.Plugin_Sound;
+                case "EdgeGlow": return c.Plugin_EdgeGlow;
+                case "Ritual": return c.Plugin_Ritual;
+                case "Stats": return c.Plugin_Stats;
+                case "Movement": return c.Plugin_Movement;
+                case "Guard": return c.Plugin_Guard;
+                default: return false;
+            }
+        }
+
+        private static void SetFlag(AppConfig c, string id, bool v)
+        {
+            switch (id)
+            {
+                case "Sound": c.Plugin_Sound = v; break;
+                case "EdgeGlow": c.Plugin_EdgeGlow = v; break;
+                case "Ritual": c.Plugin_Ritual = v; break;
+                case "Stats": c.Plugin_Stats = v; break;
+                case "Movement": c.Plugin_Movement = v; break;
+                case "Guard": c.Plugin_Guard = v; break;
+            }
+        }
+    }
+
+    // ================================================================
+    // 3.10 A5 仪式音插件
+    // ================================================================
+    //
+    // 挂在 StartPreview 而不是 BeginRest：
+    //   预告是"还有 30 秒"的那个时点，这时候提人才有用；等遮罩盖上来才响，
+    //   人已经被打断了，声音只是二次打扰。
+    //
+    // 用 Timer 串行重复，而不是一次合成"含 N 声"的 WAV：
+    //   N 在调用时才确定（1~3）。现合成意味着每次都要走一遍 BuildWave + pin；
+    //   缓存 3 份又多两份永不释放的 pin。Timer 方案只合成 1 份、复用一个 pin，
+    //   且关闭插件能立刻停 —— 这是"关闭即释放"那条硬要求在声音上的落点。
+    internal class RitualSoundPlugin : IEyeLitePlugin
+    {
+        private const int GapMs = 220;      // 每声间隔：比 180ms 的短音长一点，听感才不糊
+
+        private bool enabled;
+        private System.Windows.Forms.Timer repeatTimer;
+        private int remaining;
+
+        public string Id { get { return "Sound"; } }
+        public string DisplayName { get { return "仪式音"; } }
+        public string Description { get { return "预告出现时按紧迫度响 1~3 声基音。"; } }
+        public bool IsEnabled { get { return enabled; } }
+
+        public void OnEnable()
+        {
+            // 这里故意不建 Timer：真正要响的时候才建（大多数周期一次都不响）
+            enabled = true;
+        }
+
+        public void OnDisable()
+        {
+            enabled = false;
+            StopRepeat();
+        }
+
+        /// <summary>
+        /// 播 count 声（钳在 1~3），第一声立刻响，其余每隔 220ms 一声。
+        /// 重复调用会先停掉上一轮，避免两轮叠在一起变成噪音。
+        /// </summary>
+        public void PlayRitual(int count)
+        {
+            if (!enabled) return;
+            if (count < 1) count = 1;
+            if (count > 3) count = 3;
+
+            StopRepeat();
+
+            Sfx.PlayRitualOnce();
+            remaining = count - 1;
+            if (remaining <= 0) return;
+
+            repeatTimer = new System.Windows.Forms.Timer();
+            repeatTimer.Interval = GapMs;
+            repeatTimer.Tick += delegate { OnRepeatTick(); };
+            repeatTimer.Start();
+        }
+
+        private void OnRepeatTick()
+        {
+            if (remaining <= 0)
+            {
+                StopRepeat();
+                return;
+            }
+
+            remaining--;
+            Sfx.PlayRitualOnce();
+            if (remaining <= 0) StopRepeat();
+        }
+
+        private void StopRepeat()
+        {
+            if (repeatTimer != null)
+            {
+                try { repeatTimer.Stop(); } catch { }
+                try { repeatTimer.Dispose(); } catch { }
+                repeatTimer = null;
+            }
+            remaining = 0;
+        }
+    }
+
+    // ================================================================
+    // 3.11 A1 边缘辉光（插件 EdgeGlow）
+    // ================================================================
+    //
+    // 为什么是"一个整屏 Form + 窗口 Region 只留四条窄边"（而不是四条独立窄窗、也不是全屏位图）：
+    //   · 全屏位图渐变违反文件头第 5 条（3840×2160×4 ≈ 33MB/屏）；
+    //   · 四条独立窄窗每屏多 3 个窗口句柄，TopMost 层级与释放都更啰嗦；
+    //   · Region 只留四边 → 中间那块**根本不属于这个窗口**：既不会被画黑、也不参与命中测试。
+    //     比 TransparencyKey 干净 —— TransparencyKey 与 Opacity 同用时在部分机器上会互相干扰。
+    //
+    // 呼吸只改整窗 Opacity（0.05 ↔ 0.35，3 秒一个来回），不重画、不缓存任何位图。
+    internal class EdgeGlowForm : Form
+    {
+        private const int BandDefault = 6;      // 96dpi 下的边带厚度
+
+        private int band = BandDefault;
+        private float dpiScale = 1f;
+
+        public EdgeGlowForm(Rectangle bounds)
+        {
+            dpiScale = Ui.DetectScale(this);
+
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.StartPosition = FormStartPosition.Manual;
+            this.Bounds = bounds;
+            this.ShowInTaskbar = false;
+            this.TopMost = true;
+            this.BackColor = Color.Black;
+            this.AutoScaleMode = AutoScaleMode.None;
+            this.SetStyle(ControlStyles.AllPaintingInWmPaint |
+                          ControlStyles.OptimizedDoubleBuffer |
+                          ControlStyles.UserPaint, true);
+
+            band = (int)(BandDefault * dpiScale + 0.5f);
+            if (band < 2) band = 2;
+
+            // 构造期先压到 0：让 CreateParams 带上 WS_EX_LAYERED，首帧不会闪一帧满亮度
+            try { this.Opacity = 0.0; }
+            catch { }
+
+            RebuildRegion();
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000;   // WS_EX_NOACTIVATE：不抢焦点
+                cp.ExStyle |= 0x00000080;   // WS_EX_TOOLWINDOW：不进 Alt+Tab、不占任务栏
+                cp.ExStyle |= 0x00000020;   // WS_EX_TRANSPARENT：鼠标穿透，不拦任何点击
+                cp.ExStyle |= 0x00000008;   // WS_EX_TOPMOST：压在其他窗口之上
+                return cp;
+            }
+        }
+
+        /// <summary>整窗不透明度（呼吸用）。句柄没建好时直接忽略。</summary>
+        public void SetAlpha(double a)
+        {
+            if (a < 0.0) a = 0.0;
+            if (a > 1.0) a = 1.0;
+            try
+            {
+                if (!this.IsHandleCreated) return;
+                this.Opacity = a;
+            }
+            catch { }
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            RebuildRegion();
+        }
+
+        /// <summary>窗口只占四条窄边：中间区域不属于窗口，天然透明、天然不挡鼠标。</summary>
+        private void RebuildRegion()
+        {
+            Size s = this.ClientSize;
+            if (s.Width <= 4 || s.Height <= 4) return;
+
+            GraphicsPath path = new GraphicsPath();
+            try
+            {
+                path.AddRectangle(new Rectangle(0, 0, s.Width, band));                  // 上
+                path.AddRectangle(new Rectangle(0, s.Height - band, s.Width, band));    // 下
+                path.AddRectangle(new Rectangle(0, 0, band, s.Height));                 // 左
+                path.AddRectangle(new Rectangle(s.Width - band, 0, band, s.Height));    // 右
+
+                Region old = this.Region;
+                this.Region = new Region(path);
+                if (old != null) old.Dispose();
+            }
+            finally
+            {
+                path.Dispose();
+            }
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            // 不画背景：只有四条带子有内容；Region 之外的像素根本不会被合成
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            Size s = this.ClientSize;
+
+            // 四支渐变笔全部现场创建 + using 释放：不缓存 brush、不缓存位图
+            DrawBand(g, new Rectangle(0, 0, s.Width, band), LinearGradientMode.Vertical, false);
+            DrawBand(g, new Rectangle(0, s.Height - band, s.Width, band), LinearGradientMode.Vertical, true);
+            DrawBand(g, new Rectangle(0, 0, band, s.Height), LinearGradientMode.Horizontal, false);
+            DrawBand(g, new Rectangle(s.Width - band, 0, band, s.Height), LinearGradientMode.Horizontal, true);
+        }
+
+        /// <summary>
+        /// 画一条"从屏幕边缘向内淡出"的带子。
+        /// reverse=true 表示亮端在远端（下边/右边的亮边必须贴在屏幕边缘上）。
+        /// </summary>
+        private void DrawBand(Graphics g, Rectangle r, LinearGradientMode mode, bool reverse)
+        {
+            if (r.Width <= 0 || r.Height <= 0) return;
+
+            Color near = Ui.Accent;
+            Color far = Color.FromArgb(0, Ui.Accent);
+            Color c1 = reverse ? far : near;
+            Color c2 = reverse ? near : far;
+
+            try
+            {
+                using (LinearGradientBrush b = new LinearGradientBrush(r, c1, c2, mode))
+                {
+                    g.FillRectangle(b, r);
+                }
+            }
+            catch { }
+        }
+    }
+
+    internal class EdgeGlowPlugin : IEyeLitePlugin
+    {
+        private const int TickMs = 100;             // 呼吸刷新间隔
+        private const double PeriodMs = 3000.0;     // 一个来回 3 秒
+        private const double AlphaMin = 0.05;
+        private const double AlphaMax = 0.35;
+
+        private bool enabled;
+        private List<EdgeGlowForm> forms;
+        private System.Windows.Forms.Timer timer;
+        private double phase;                       // 0~1 呼吸相位
+        private bool windowOpen;
+
+        public string Id { get { return "EdgeGlow"; } }
+        public string DisplayName { get { return "屏幕边缘微光"; } }
+        public string Description { get { return "休息前 60 秒在屏幕四边浮一层会呼吸的微光。"; } }
+        public bool IsEnabled { get { return enabled; } }
+
+        public void OnEnable()
+        {
+            // 这里故意什么都不建：窗口和定时器都要等到"真的要亮"的那一刻
+            enabled = true;
+        }
+
+        public void OnDisable()
+        {
+            enabled = false;
+            windowOpen = false;
+            DisposeForms();
+        }
+
+        /// <summary>
+        /// 由 TrayApp 每 tick 调用一次。open 决定显隐；状态没变就什么都不做
+        /// （避免每秒 Show/Hide 抖动 —— 那会让 DWM 反复重建合成层）。
+        /// </summary>
+        public void SetWindow(bool open)
+        {
+            if (!enabled) return;
+            if (open == windowOpen) return;
+
+            windowOpen = open;
+            if (open) ShowForms();
+            else HideForms();
+        }
+
+        /// <summary>立即熄灭（进休息/预告/抑制/暂停时调用，不等下一个 tick）。</summary>
+        public void HideNow()
+        {
+            windowOpen = false;
+            HideForms();
+        }
+
+        private void ShowForms()
+        {
+            EnsureForms();
+            if (forms == null) return;
+
+            double a = CurrentAlpha();
+            for (int i = 0; i < forms.Count; i++)
+            {
+                EdgeGlowForm f = forms[i];
+                if (f == null || f.IsDisposed) continue;
+                try
+                {
+                    if (!f.Visible) f.Show();
+                    f.SetAlpha(a);
+                }
+                catch { }
+            }
+            StartTimer();
+        }
+
+        private void HideForms()
+        {
+            StopTimer();
+            if (forms == null) return;
+
+            for (int i = 0; i < forms.Count; i++)
+            {
+                EdgeGlowForm f = forms[i];
+                if (f == null || f.IsDisposed) continue;
+                try
+                {
+                    f.SetAlpha(0.0);
+                    if (f.Visible) f.Hide();
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>每屏一条。只在"真要亮"时创建 —— 未启用插件的进程里一个窗口都没有。</summary>
+        private void EnsureForms()
+        {
+            if (forms != null) return;
+
+            List<EdgeGlowForm> list = new List<EdgeGlowForm>();
+            try
+            {
+                Screen[] screens = Screen.AllScreens;
+                for (int i = 0; i < screens.Length; i++)
+                {
+                    list.Add(new EdgeGlowForm(screens[i].Bounds));
+                }
+            }
+            catch { }
+
+            forms = list;
+        }
+
+        /// <summary>余弦呼吸：0→1→0 平滑，三角波太机械。</summary>
+        private double CurrentAlpha()
+        {
+            double k = 0.5 - 0.5 * Math.Cos(2.0 * Math.PI * phase);
+            return AlphaMin + (AlphaMax - AlphaMin) * k;
+        }
+
+        private void StartTimer()
+        {
+            if (timer == null)
+            {
+                timer = new System.Windows.Forms.Timer();
+                timer.Interval = TickMs;
+                timer.Tick += delegate { OnBreathTick(); };
+            }
+            if (!timer.Enabled) timer.Start();
+        }
+
+        private void StopTimer()
+        {
+            if (timer != null)
+            {
+                try { timer.Stop(); } catch { }
+            }
+        }
+
+        private void OnBreathTick()
+        {
+            if (!enabled || !windowOpen)
+            {
+                StopTimer();
+                return;
+            }
+
+            phase += TickMs / PeriodMs;
+            if (phase >= 1.0) phase -= 1.0;
+
+            double a = CurrentAlpha();
+            if (forms == null) return;
+            for (int i = 0; i < forms.Count; i++)
+            {
+                EdgeGlowForm f = forms[i];
+                if (f == null || f.IsDisposed) continue;
+                f.SetAlpha(a);
+            }
+        }
+
+        private void DisposeForms()
+        {
+            if (timer != null)
+            {
+                try { timer.Stop(); } catch { }
+                try { timer.Dispose(); } catch { }
+                timer = null;
+            }
+
+            if (forms == null) return;
+            for (int i = 0; i < forms.Count; i++)
+            {
+                EdgeGlowForm f = forms[i];
+                if (f == null) continue;
+                try { f.SetAlpha(0.0); } catch { }
+                try { f.Hide(); } catch { }
+                try { f.Close(); } catch { }
+                try { f.Dispose(); } catch { }
+            }
+            forms.Clear();
+            forms = null;
+        }
+    }
+
+    // ================================================================
+    // 3.12 B1 眼神操 + B2 呼吸圆（插件 Ritual）
+    // ================================================================
+    //
+    // 一个窗口类 + 一个 mode 字段：B1（眼神操 8 秒）与 B2（4-7-8 呼吸）版式几乎一样，
+    // 拆成两个类会复制一堆居中/配色/定时器代码，还得维护两份"别抢焦点"的窗口风格。
+    //
+    // 每次休息新建、休息结束 Dispose（而不是 Show/Hide 复用）：
+    //   这个窗口一局只活 8~19 秒，造型又依赖"这一次的 mode"，复用反而要写重置逻辑。
+    //   一次休息一个新窗口 = 一次小分配，比留三个状态位安全。
+    //
+    // 眼睛用 GraphicsPath 现画，不载图片：零资源、任意 DPI 都清晰。
+    internal class RitualForm : Form
+    {
+        private const int TickMs = 16;          // 约 60fps
+
+        private const int EyeSteps = 4;
+        private const int EyeStepMs = 2000;     // 每步 2 秒 → 共 8 秒
+        private const int BreathInMs = 4000;
+        private const int BreathHoldMs = 7000;
+        private const int BreathOutMs = 8000;
+        private const int BreathCycleMs = BreathInMs + BreathHoldMs + BreathOutMs;  // 19 秒
+
+        private int mode;                       // 0 = 眼神操(B1)，1 = 呼吸圆(B2)
+        private System.Windows.Forms.Timer anim;
+        private int elapsedMs;
+        private float dpiScale = 1f;
+
+        public RitualForm(int mode)
+        {
+            dpiScale = Ui.DetectScale(this);
+            this.mode = mode;
+
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.StartPosition = FormStartPosition.Manual;
+            this.ShowInTaskbar = false;
+            this.TopMost = true;
+            this.BackColor = Ui.GradTop;
+            this.AutoScaleMode = AutoScaleMode.None;
+            this.DoubleBuffered = true;
+            this.Font = Ui.FontUi;
+
+            int w = Sc(320);
+            int h = Sc(360);
+            this.Size = new Size(w, h);
+            CenterOnPrimary(w, h);
+
+            try { this.Opacity = 0.96; }
+            catch { }
+
+            anim = new System.Windows.Forms.Timer();
+            anim.Interval = TickMs;
+            anim.Tick += delegate { OnAnimTick(); };
+            anim.Start();
+        }
+
+        private int Sc(int px)
+        {
+            return (int)(px * dpiScale + 0.5f);
+        }
+
+        /// <summary>居中到主屏工作区（不跟随鼠标：休息时人的注意力应该回到屏幕中间）。</summary>
+        private void CenterOnPrimary(int w, int h)
+        {
+            try
+            {
+                Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+                this.Location = new Point(wa.Left + (wa.Width - w) / 2, wa.Top + (wa.Height - h) / 2);
+            }
+            catch { }
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000;   // WS_EX_NOACTIVATE：不抢焦点（不打断输入法组词）
+                cp.ExStyle |= 0x00000080;   // WS_EX_TOOLWINDOW：不进 Alt+Tab、不占任务栏
+                return cp;
+            }
+        }
+
+        private void OnAnimTick()
+        {
+            try
+            {
+                elapsedMs += TickMs;
+
+                int total = mode == 0 ? EyeStepMs * EyeSteps : BreathCycleMs;
+                if (elapsedMs >= total)
+                {
+                    // 走完自动关闭（不再开下一轮：这是一次性的仪式）
+                    StopAnim();
+                    try { this.Close(); } catch { }
+                    return;
+                }
+                this.Invalidate();
+            }
+            catch { }
+        }
+
+        private void StopAnim()
+        {
+            if (anim != null)
+            {
+                try { anim.Stop(); } catch { }
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (anim != null)
+                {
+                    try { anim.Stop(); } catch { }
+                    try { anim.Dispose(); } catch { }
+                    anim = null;
+                }
+            }
+            base.Dispose(disposing);
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            try { e.Graphics.Clear(Ui.GradTop); }
+            catch { }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            try { g.SmoothingMode = SmoothingMode.AntiAlias; }
+            catch { }
+
+            int w = this.ClientSize.Width;
+            int h = this.ClientSize.Height;
+
+            // 眉标 + 步骤/节拍文字都用 TextRenderer 画（与程序其它地方同一套渲染口径）
+            string title = mode == 0 ? "眼神操" : "4-7-8 呼吸";
+            TextRenderer.DrawText(g, title, Ui.FontEyebrow,
+                new Rectangle(0, Sc(16), w, Sc(20)), Ui.EyebrowText,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
+
+            if (mode == 0) PaintEyeExercise(g, w, h);
+            else PaintBreathing(g, w, h);
+        }
+
+        // ---------- B1：8 秒眼神操（4 步 × 2 秒）----------
+        private void PaintEyeExercise(Graphics g, int w, int h)
+        {
+            int step = elapsedMs / EyeStepMs;
+            if (step < 0) step = 0;
+            if (step > EyeSteps - 1) step = EyeSteps - 1;
+            int inStep = elapsedMs - step * EyeStepMs;      // 0..1999
+
+            int cx = w / 2;
+            int cy = Sc(180);
+            int ew = Sc(200);      // 眼形宽
+            int eh = Sc(64);       // 眼形高（半高 Sc(32)）
+
+            // 眨眼步：用一段"闭-开"的时长包络把眼形压扁
+            double squash = 1.0;
+            if (step == 1)
+            {
+                // 每 500ms 眨一次，闭合占 140ms
+                int blinkPhase = inStep % 500;
+                if (blinkPhase < 140) squash = 0.08;
+            }
+            else if (step == 3)
+            {
+                // 闭眼：整步都是闭合状态，最后 300ms 慢慢睁开一点
+                squash = inStep < EyeStepMs - 300 ? 0.06 : 0.5;
+            }
+
+            int halfH = (int)(eh / 2 * squash);
+            if (halfH < Sc(2)) halfH = Sc(2);
+
+            // 杏仁形：上下两条贝塞尔曲线闭合
+            GraphicsPath eye = new GraphicsPath();
+            try
+            {
+                eye.AddBezier(cx - ew / 2, cy,
+                              cx - ew / 4, cy - halfH * 2,
+                              cx + ew / 4, cy - halfH * 2,
+                              cx + ew / 2, cy);
+                eye.AddBezier(cx + ew / 2, cy,
+                              cx + ew / 4, cy + halfH * 2,
+                              cx - ew / 4, cy + halfH * 2,
+                              cx - ew / 2, cy);
+                eye.CloseFigure();
+
+                using (Pen pen = new Pen(Ui.TimeText, Math.Max(1f, Sc(2))))
+                {
+                    g.DrawPath(pen, eye);
+                }
+
+                // 瞳孔：按步骤移动（眨眼步不用特殊处理 —— halfH 已经被压扁，瞳孔跟着变小）
+                int px = cx;
+                int py = cy;
+                int pr = Math.Max(Sc(3), halfH / 2);
+
+                if (step == 0)
+                {
+                    // 左右看：一个来回
+                    double t = inStep / (double)EyeStepMs;          // 0..1
+                    px = cx + (int)(Math.Sin(t * 2.0 * Math.PI) * (ew / 2 - pr * 1.6));
+                }
+                else if (step == 2)
+                {
+                    // 转眼球：画小圆
+                    double t = inStep / (double)EyeStepMs;
+                    px = cx + (int)(Math.Cos(t * 2.0 * Math.PI) * (ew / 5));
+                    py = cy + (int)(Math.Sin(t * 2.0 * Math.PI) * (eh / 6));
+                }
+
+                if (pr < Sc(2)) pr = Sc(2);
+
+                using (SolidBrush b = new SolidBrush(Ui.Accent))
+                {
+                    g.FillEllipse(b, px - pr, py - pr, pr * 2, pr * 2);
+                }
+            }
+            finally
+            {
+                eye.Dispose();
+            }
+
+            // 步骤说明 + 进度点
+            string caption;
+            if (step == 0) caption = "左右看";
+            else if (step == 1) caption = "快速眨眼";
+            else if (step == 2) caption = "转眼球";
+            else caption = "闭眼";
+
+            TextRenderer.DrawText(g, caption, Ui.FontRestEyebrow,
+                new Rectangle(0, Sc(268), w, Sc(28)), Ui.TimeText,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
+
+            TextRenderer.DrawText(g, (step + 1) + " / " + EyeSteps, Ui.FontEyebrow,
+                new Rectangle(0, Sc(300), w, Sc(18)), Ui.RingLabel,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
+
+            // 底部进度条：8 秒还剩多久一眼可见
+            int barW = w - Sc(64);
+            int barY = Sc(330);
+            int barH = Math.Max(2, Sc(3));
+            using (SolidBrush track = new SolidBrush(Ui.RingTrack))
+            {
+                g.FillRectangle(track, Sc(32), barY, barW, barH);
+            }
+            int done = (int)(barW * (elapsedMs / (double)(EyeStepMs * EyeSteps)));
+            if (done > 0)
+            {
+                using (SolidBrush fg = new SolidBrush(Ui.Accent))
+                {
+                    g.FillRectangle(fg, Sc(32), barY, done, barH);
+                }
+            }
+        }
+
+        // ---------- B2：4-7-8 呼吸（吸 4s / 屏 7s / 呼 8s）----------
+        private void PaintBreathing(Graphics g, int w, int h)
+        {
+            int cx = w / 2;
+            int cy = Sc(180);
+
+            int rMin = Sc(52);
+            int rMax = Sc(104);
+            double k;               // 0 = 最小圆，1 = 最大圆
+            string caption;
+            int leftSec;
+
+            if (elapsedMs < BreathInMs)
+            {
+                double t = elapsedMs / (double)BreathInMs;
+                k = EaseInOut(t);                       // 吸气：慢慢鼓起来
+                caption = "吸气";
+                leftSec = (BreathInMs - elapsedMs + 999) / 1000;
+            }
+            else if (elapsedMs < BreathInMs + BreathHoldMs)
+            {
+                k = 1.0;                                // 屏息：保持最大
+                caption = "屏住";
+                leftSec = (BreathInMs + BreathHoldMs - elapsedMs + 999) / 1000;
+            }
+            else
+            {
+                double t = (elapsedMs - BreathInMs - BreathHoldMs) / (double)BreathOutMs;
+                k = 1.0 - EaseInOut(t);                 // 呼气：慢慢收回
+                caption = "呼气";
+                leftSec = (BreathCycleMs - elapsedMs + 999) / 1000;
+            }
+
+            if (k < 0.0) k = 0.0;
+            if (k > 1.0) k = 1.0;
+
+            int r = rMin + (int)((rMax - rMin) * k);
+
+            // 外圈轨道（常驻）+ 内圈实心（随呼吸缩放）
+            using (Pen track = new Pen(Ui.RingTrack, Math.Max(1f, Sc(2))))
+            {
+                g.DrawEllipse(track, cx - rMax, cy - rMax, rMax * 2, rMax * 2);
+            }
+            using (SolidBrush fill = new SolidBrush(Color.FromArgb(70, Ui.Accent)))
+            {
+                g.FillEllipse(fill, cx - r, cy - r, r * 2, r * 2);
+            }
+            using (Pen edge = new Pen(Ui.Accent, Math.Max(1f, Sc(2))))
+            {
+                g.DrawEllipse(edge, cx - r, cy - r, r * 2, r * 2);
+            }
+
+            TextRenderer.DrawText(g, caption, Ui.FontRestEyebrow,
+                new Rectangle(0, Sc(268), w, Sc(28)), Ui.TimeText,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
+
+            TextRenderer.DrawText(g, leftSec + " 秒", Ui.FontEyebrow,
+                new Rectangle(0, Sc(300), w, Sc(18)), Ui.RingLabel,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
+        }
+
+        /// <summary>ease-in-out：0→1 用半个余弦，两端速度为 0，呼吸感才对。</summary>
+        private static double EaseInOut(double t)
+        {
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            return 0.5 - 0.5 * Math.Cos(Math.PI * t);
+        }
+    }
+
+    internal class RitualPlugin : IEyeLitePlugin
+    {
+        private bool enabled;
+        private RitualForm form;
+        private int sessions;       // 每轮休息 +1，用来交替 B1 / B2
+
+        public string Id { get { return "Ritual"; } }
+        public string DisplayName { get { return "休息仪式"; } }
+        public string Description { get { return "休息开始时弹眼神操 / 4-7-8 呼吸，两者交替。"; } }
+        public bool IsEnabled { get { return enabled; } }
+
+        public void OnEnable()
+        {
+            enabled = true;
+        }
+
+        public void OnDisable()
+        {
+            enabled = false;
+            Hide();
+        }
+
+        /// <summary>
+        /// 休息开始时调：第 1 次眼操、第 2 次呼吸、循环。
+        /// 没有 UI 配置，先用这个固定顺序（设置页以后再加"只要眼操 / 只要呼吸 / 交替"）。
+        /// </summary>
+        public void ShowForRest()
+        {
+            if (!enabled) return;
+
+            Hide();                     // 上一轮没关干净就扔掉，绝不留两个窗
+
+            int mode = sessions % 2;
+            sessions++;
+
+            try
+            {
+                form = new RitualForm(mode);
+                form.Show();
+            }
+            catch
+            {
+                // 仪式窗出问题绝不能影响休息本身
+                form = null;
+            }
+        }
+
+        /// <summary>休息结束时调（EndRest）：关闭并释放。</summary>
+        public void Hide()
+        {
+            if (form == null) return;
+
+            RitualForm f = form;
+            form = null;
+
+            try { if (!f.IsDisposed) f.Close(); } catch { }
+            try { f.Dispose(); } catch { }
+        }
+
+        /// <summary>
+        /// 小窗句柄（没有窗口时返回 Zero）。TrayApp 每秒用它把仪式窗重新抬到遮罩之上：
+        /// 遮罩那边每秒都会 SetWindowPos 重申 TopMost，会把置顶组的最前面抢回去。
+        /// </summary>
+        public IntPtr WindowHandle
+        {
+            get
+            {
+                RitualForm f = form;
+                if (f == null || f.IsDisposed || !f.IsHandleCreated) return IntPtr.Zero;
+                return f.Handle;
+            }
+        }
+    }
+
+    // ================================================================
+    // 3.13 F1 三态统计（插件 Stats）
+    // ================================================================
+    //
+    // 这个插件本身几乎不做事：真正的计数点在 TrayApp 的状态机里（那里才分得清
+    // "坐满 / 跳过 / 被让路"，插件拿不到这些状态）。
+    // 它存在的意义是：① 让"是否启用"这件事和其它插件同一套机制（未启用 → Get 返回 null →
+    // 调用方连计数都不执行）；② 计数落盘、后续按天聚合都归它管。
+    internal class StatsPlugin : IEyeLitePlugin
+    {
+        private bool enabled;
+
+        public string Id { get { return "Stats"; } }
+        public string DisplayName { get { return "用眼统计"; } }
+        public string Description { get { return "记录完成 / 跳过 / 忽略的次数（只计数）。"; } }
+        public bool IsEnabled { get { return enabled; } }
+
+        public void OnEnable()
+        {
+            enabled = true;
+        }
+
+        public void OnDisable()
+        {
+            enabled = false;
+        }
+
+        // 三个计数入口。cfg 由调用方传入（插件不持有全局配置，避免两处状态）
+        public void BumpDone(AppConfig cfg)
+        {
+            if (!enabled || cfg == null) return;
+            cfg.StatDone++;
+            Persist(cfg);
+        }
+
+        public void BumpSkip(AppConfig cfg)
+        {
+            if (!enabled || cfg == null) return;
+            cfg.StatSkip++;
+            Persist(cfg);
+        }
+
+        public void BumpIgnore(AppConfig cfg)
+        {
+            if (!enabled || cfg == null) return;
+            cfg.StatIgnore++;
+            Persist(cfg);
+        }
+
+        /// <summary>
+        /// 每次计数立刻写盘：这三个数一天只变几次，写盘成本可以忽略，
+        /// 但"被任务管理器强杀"时不会丢 —— 统计最忌讳的就是悄悄少记。
+        /// </summary>
+        private static void Persist(AppConfig cfg)
+        {
+            try { cfg.Save(); } catch { }
+        }
+    }
+
+    // ================================================================
     // 4. 配置
     // ================================================================
     internal class AppConfig
@@ -1159,6 +2268,48 @@ namespace EyeLite
         // 契约 §10.1「可配置 ≠ 可卸载」：代码恒在包里，这个开关只决定**要不要抑制**。
         // 默认开 —— 全屏/演示时弹遮罩是最典型的"错误时机打扰"（调研文档第一段的用户原话）。
         public bool SuppressOnFullscreen = true;
+
+        // ---- C3：前台进程白名单（核心功能，不是插件）----
+        //
+        // 与 P0-C 的 QUNS gate 互补：QUNS 只认"全屏/演示"，
+        // 而窗口化看片、PotPlayer 非全屏、OBS 预览窗口这些都查不到 QUNS。
+        // 那种时候弹遮罩同样是"错误时机的打扰"，所以要再看一眼前台进程名。
+        //
+        // 默认开；命中白名单后最多让路 10 分钟（见 TrayApp.DeferredByActivity），
+        // 超过就强制提醒 —— 白名单不能变成"永不提醒"的后门。
+        public bool ForegroundGuardEnabled = true;
+        public string ForegroundWhitelist = "vlc.exe;potplayermini64.exe;wmplayer.exe;mpc-hc64.exe;obs64.exe";
+
+        // ---- C4：打字段检测（核心）----
+        // 到点那一刻如果用户正在连续敲键（idle < 300ms），先让 5 秒，
+        // 累计最多 60 秒。数据来源是 RawIdleMs()，与空闲计时同一口径。
+        public bool TypingGuardEnabled = true;
+
+        // ---- G3：休息卡三选一（默认关，避免改变现有版式）----
+        // 开启后遮罩上是「跳过 / 坐一分钟 / 推迟」三个按钮，两个旧按钮按比例缩小。
+        // 默认关 = 一个像素都不变。
+        public bool SittingOptionEnabled = false;
+
+        // ---- P1 插件开关（全部默认 false：默认即纯核心，不启用就不创建任何对象）----
+        public bool Plugin_Sound = false;
+        public bool Plugin_EdgeGlow = false;
+        public bool Plugin_Ritual = false;
+        public bool Plugin_Stats = false;
+        public bool Plugin_Movement = false;
+        public bool Plugin_Guard = false;
+
+        // ---- F1 三态统计（Plugin_Stats 启用后才有意义，但字段恒在：读写不做条件分支）----
+        //
+        // 三态的定义（产品口径，不要在别处重新解释）：
+        //   完成 = 坐满了这一次休息（自然到期），或按了「坐一分钟」
+        //   跳过 = 用户主动点跳过（预告横幅里、遮罩上，都算）
+        //   忽略 = 到点了，但既没坐满也没点跳过，而是被让路/被抑制拖过 5 分钟
+        //
+        // 只是计数，不做任何健康判断 —— 界面上必须有一句这样的话，
+        // 否则"完成 3 次"很容易被读成"你今天很健康"。
+        public int StatDone = 0;
+        public int StatSkip = 0;
+        public int StatIgnore = 0;
 
         public static string ConfigDir
         {
@@ -1210,6 +2361,20 @@ namespace EyeLite
                         case "SedentarySeconds": c.SedentarySeconds = Clamp(v, 120, 30, 300); break;
                         case "CameraCountEnabled": c.CameraCountEnabled = v == "1"; break;
                         case "SuppressOnFullscreen": c.SuppressOnFullscreen = v == "1"; break;
+                        case "ForegroundGuardEnabled": c.ForegroundGuardEnabled = v == "1"; break;
+                        // 白名单是字符串，不过 Clamp（它不是数值）；条目里的空白留到解析时再 Trim
+                        case "ForegroundWhitelist": c.ForegroundWhitelist = v; break;
+                        case "TypingGuardEnabled": c.TypingGuardEnabled = v == "1"; break;
+                        case "SittingOptionEnabled": c.SittingOptionEnabled = v == "1"; break;
+                        case "Plugin_Sound": c.Plugin_Sound = v == "1"; break;
+                        case "Plugin_EdgeGlow": c.Plugin_EdgeGlow = v == "1"; break;
+                        case "Plugin_Ritual": c.Plugin_Ritual = v == "1"; break;
+                        case "Plugin_Stats": c.Plugin_Stats = v == "1"; break;
+                        case "Plugin_Movement": c.Plugin_Movement = v == "1"; break;
+                        case "Plugin_Guard": c.Plugin_Guard = v == "1"; break;
+                        case "StatDone": c.StatDone = Clamp(v, 0, 0, 100000000); break;
+                        case "StatSkip": c.StatSkip = Clamp(v, 0, 0, 100000000); break;
+                        case "StatIgnore": c.StatIgnore = Clamp(v, 0, 0, 100000000); break;
                     }
                 }
             }
@@ -1252,6 +2417,19 @@ namespace EyeLite
                 sb.AppendLine("SedentarySeconds=" + SedentarySeconds);
                 sb.AppendLine("CameraCountEnabled=" + (CameraCountEnabled ? "1" : "0"));
                 sb.AppendLine("SuppressOnFullscreen=" + (SuppressOnFullscreen ? "1" : "0"));
+                sb.AppendLine("ForegroundGuardEnabled=" + (ForegroundGuardEnabled ? "1" : "0"));
+                sb.AppendLine("ForegroundWhitelist=" + ForegroundWhitelist);
+                sb.AppendLine("TypingGuardEnabled=" + (TypingGuardEnabled ? "1" : "0"));
+                sb.AppendLine("SittingOptionEnabled=" + (SittingOptionEnabled ? "1" : "0"));
+                sb.AppendLine("Plugin_Sound=" + (Plugin_Sound ? "1" : "0"));
+                sb.AppendLine("Plugin_EdgeGlow=" + (Plugin_EdgeGlow ? "1" : "0"));
+                sb.AppendLine("Plugin_Ritual=" + (Plugin_Ritual ? "1" : "0"));
+                sb.AppendLine("Plugin_Stats=" + (Plugin_Stats ? "1" : "0"));
+                sb.AppendLine("Plugin_Movement=" + (Plugin_Movement ? "1" : "0"));
+                sb.AppendLine("Plugin_Guard=" + (Plugin_Guard ? "1" : "0"));
+                sb.AppendLine("StatDone=" + StatDone);
+                sb.AppendLine("StatSkip=" + StatSkip);
+                sb.AppendLine("StatIgnore=" + StatIgnore);
                 File.WriteAllText(ConfigPath, sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -1284,6 +2462,7 @@ namespace EyeLite
 
         private bool showButtons;
         private bool allowSkip;
+        private bool withSitting;      // G3：第三个出口「坐一分钟」（默认关）
 
         // DPI 缩放因子（1.0 = 96dpi）。所有物理像素版式常量都过 Sc()，
         // 让任何 DPI 下"字体高度 : 盒子高度"的比值恒定，文字不会被裁。
@@ -1298,14 +2477,18 @@ namespace EyeLite
 
         public event EventHandler RequestSkip;
         public event EventHandler RequestPostpone;
+        /// <summary>G3 第三个出口「坐一分钟」：结束本轮，但计为完成。</summary>
+        public event EventHandler RequestSitting;
 
-        public RestForm(Screen screen, bool allowSkip, int postponeMinutes, bool withButtons)
+        public RestForm(Screen screen, bool allowSkip, int postponeMinutes, bool withButtons,
+                        bool withSittingOption)
         {
             // 必须在算任何版式之前取到 DPI 因子（此时窗体还没有句柄）
             dpiScale = Ui.DetectScale(this);
 
             this.allowSkip = allowSkip;
             this.showButtons = withButtons;
+            this.withSitting = withSittingOption;
 
             this.FormBorderStyle = FormBorderStyle.None;
             this.StartPosition = FormStartPosition.Manual;
@@ -1450,28 +2633,71 @@ namespace EyeLite
 
             if (hasButtons)
             {
-                // 两枚按钮整体水平居中：总宽 Sc(176) + Sc(16) + Sc(150) = Sc(342)，半宽 Sc(171)。
-                //   跳过：w/2 - Sc(171)，占 [-171, +5]
-                //   推迟：w/2 + Sc(21)，占 [+21, +171]（5 + 16 = 21）
-                // 之前写的是 -Sc(184) / +Sc(8)，组中心落在 -13px 上，肉眼可见偏左。
                 // 描边宽度随 DPI 缩放，否则 150% 下 1px 细得像没画
                 int bw = Math.Max(1, Sc(1));
-                btnSkip = new RoundButton("跳过 (Esc/空格)", Sc(21),
+
+                // G3：三出口只是"多一个按钮 + 重算几何"，描边色、事件、字体全部复用同一套。
+                // 关闭时（withSitting=false）几何与改动前逐像素一致，见下面的 else 分支。
+                int skipW, skipX, postW, postX, sitW, sitX;
+                if (withSitting)
+                {
+                    // 三个等宽按钮均分：Sc(120) × 3 + 两道 Sc(12) 间距 = Sc(384)，半宽 Sc(192)
+                    skipW = Sc(120);
+                    sitW = Sc(120);
+                    postW = Sc(120);
+                    int g = Sc(12);
+                    skipX = w / 2 - Sc(192);
+                    sitX = skipX + skipW + g;
+                    postX = sitX + sitW + g;
+                }
+                else
+                {
+                    // 两枚按钮整体水平居中：总宽 Sc(176) + Sc(16) + Sc(150) = Sc(342)，半宽 Sc(171)。
+                    //   跳过：w/2 - Sc(171)，占 [-171, +5]
+                    //   推迟：w/2 + Sc(21)，占 [+21, +171]（5 + 16 = 21）
+                    // 之前写的是 -Sc(184) / +Sc(8)，组中心落在 -13px 上，肉眼可见偏左。
+                    skipW = Sc(176);
+                    skipX = w / 2 - Sc(171);
+                    sitW = 0;
+                    sitX = 0;
+                    postW = Sc(150);
+                    postX = w / 2 + Sc(21);
+                }
+
+                // 三出口时文案压短一个括号：「跳过 (Esc/空格)」在 Sc(120) 里会被省略号截断，
+                // 而 Esc/空格 这条提示比括号重要，所以去掉括号保提示。
+                btnSkip = new RoundButton(withSitting ? "跳过 Esc/空格" : "跳过 (Esc/空格)", Sc(21),
                                           Ui.DarkBtnBg, Ui.DarkBtnHover,
                                           Ui.SkipText, Ui.Accent, bw);
                 btnSkip.Font = Ui.FontRowLabel;
-                btnSkip.SetBounds(w / 2 - Sc(171), yBtn, Sc(176), btnH);
+                btnSkip.SetBounds(skipX, yBtn, skipW, btnH);
                 btnSkip.Click += delegate
                 {
                     if (RequestSkip != null) RequestSkip(this, EventArgs.Empty);
                 };
                 this.Controls.Add(btnSkip);
 
+                // 「坐一分钟」放在中间：它不是"跳过"的近义词，而是"我坐了，算完成"，
+                // 视觉上用强调色描边与"跳过"区分（填充仍与其它按钮一致，不抢主次）。
+                if (withSitting)
+                {
+                    RoundButton btnSit = new RoundButton("坐一分钟", Sc(21),
+                                                         Ui.DarkBtnBg, Ui.DarkBtnHover,
+                                                         Ui.SkipText, Ui.Accent, bw);
+                    btnSit.Font = Ui.FontRowLabel;
+                    btnSit.SetBounds(sitX, yBtn, sitW, btnH);
+                    btnSit.Click += delegate
+                    {
+                        if (RequestSitting != null) RequestSitting(this, EventArgs.Empty);
+                    };
+                    this.Controls.Add(btnSit);
+                }
+
                 RoundButton btnPostpone = new RoundButton("推迟 " + postponeMinutes + " 分钟", Sc(21),
                                                           Ui.DarkBtnBg, Ui.DarkBtnHover,
                                                           Ui.DarkBtnText, Ui.DarkBtnBorder, bw);
                 btnPostpone.Font = Ui.FontRowLabel;
-                btnPostpone.SetBounds(w / 2 + Sc(21), yBtn, Sc(150), btnH);
+                btnPostpone.SetBounds(postX, yBtn, postW, btnH);
                 btnPostpone.Click += delegate
                 {
                     if (RequestPostpone != null) RequestPostpone(this, EventArgs.Empty);
@@ -2389,8 +3615,30 @@ namespace EyeLite
             CheckBox chkCamera = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 7, "摄像头计数（暂未开放）", false);
             chkCamera.Enabled = false;
 
-            // ---------- 底部按钮：最后一排卡片底部 + Sc(24) ----------
-            int btnY = y + Sc(304) + Sc(24);
+            // ---------- 卡片 5：统计（只在 Plugin_Stats 启用时出现）----------
+            // 关闭时**整张卡都不创建**：默认界面必须与之前逐像素一致，
+            // 所以 btnY 的算法分成两支，else 分支就是原来那一行，一个字都没改。
+            int btnY;
+            if (cfg.Plugin_Stats)
+            {
+                int statTop = y + Sc(304) + Sc(Gap);
+                RoundPanel cardStat = AddCard(statTop, Sc(168), "统计");
+
+                AddInfoRow(cardStat, Sc(FirstRowTop), "完成 " + cfg.StatDone + " 次", Ui.LabelText);
+                AddInfoRow(cardStat, Sc(FirstRowTop) + Sc(RowHeight) * 1, "跳过 " + cfg.StatSkip + " 次", Ui.LabelText);
+                AddInfoRow(cardStat, Sc(FirstRowTop) + Sc(RowHeight) * 2, "忽略 " + cfg.StatIgnore + " 次", Ui.LabelText);
+                // 这句不是免责声明套话：三态计数非常容易被读成"用眼健康评分"，
+                // 必须明确这不是健康判断，否则就是在制造焦虑。
+                AddInfoRow(cardStat, Sc(FirstRowTop) + Sc(RowHeight) * 3,
+                           "这不是健康诊断，只记录发生过的次数", Ui.CaptionText);
+
+                btnY = statTop + Sc(168) + Sc(24);
+            }
+            else
+            {
+                // ---------- 底部按钮：最后一排卡片底部 + Sc(24) ----------
+                btnY = y + Sc(304) + Sc(24);
+            }
 
             RoundButton ok = new RoundButton("保存", Sc(8), Ui.PrimaryBg, Ui.PrimaryHover,
                                              Color.White, Color.Empty, 0);
@@ -2637,6 +3885,23 @@ namespace EyeLite
             return c;
         }
 
+        /// <summary>
+        /// 只读信息行（统计卡用）。行槽、字号、缩进都与 AddRow 一致，
+        /// 所以统计卡和上面的设置卡在视觉上是同一条网格。
+        /// </summary>
+        private void AddInfoRow(RoundPanel card, int top, string text, Color color)
+        {
+            Label l = new Label();
+            l.Text = text;
+            l.Font = Ui.FontRowLabel;
+            l.ForeColor = color;
+            l.BackColor = Ui.CardBg;
+            l.AutoSize = false;
+            l.TextAlign = ContentAlignment.MiddleLeft;
+            l.SetBounds(Sc(CardPad), top + Sc(4), Sc(CardWidth) - Sc(CardPad) * 2, Sc(24));
+            card.Controls.Add(l);
+        }
+
         private void ApplyTo(AppConfig cfg)
         {
             cfg.WorkMinutes = (int)numWork.Value;
@@ -2730,6 +3995,28 @@ namespace EyeLite
         private long suppressNoticeAtMs = 0;    // 下次弹「已暂缓」横幅的时刻
         private bool suppressForced = false;    // 本轮连续抑制中是否已强制放行过
         private QunsState currentQuns = QunsState.NotForcedOn;
+
+        // ---- C3/C4：到点前的"临门一脚"让路（核心功能）----
+        //
+        // 两套让路各自计时、互不覆盖：最终截止时刻取**较大**的那个，
+        // 因为"正在看片"和"正在打字"是完全可能同时成立的。
+        // 每个 since 字段在对应条件消失时归零，所以"累计上限"是按**连续命中**算的。
+        private long deferUntilMs = 0;      // 当前让路的截止时刻（0 = 没在让）
+        private long c3DeferSinceMs = 0;    // 前台白名单连续命中的起点（10 分钟上限用）
+        private long c4DeferSinceMs = 0;    // 连续打字的起点（60 秒上限用）
+
+        // A5：连续"没真正休息"的周期数（跳过 / 推迟 / 被让路都算）
+        // 用来编码仪式音的紧迫度，见 RitualRepeatCount()。
+        private int cyclesWithoutRest = 0;
+
+        /// <summary>已完成休息次数（自然结束 + 「坐一分钟」）。F1 统计的数据源，暂未展示。</summary>
+        public int CompletedRests = 0;
+
+        // ---- F1「忽略」计数的状态机 ----
+        // 忽略 = 到点了，但既没坐满也没点跳过，而是被让路 / 被抑制拖过 5 分钟。
+        // 必须只记一次：所以要有"本轮已计"的标记，否则每秒都会 +1。
+        private long ignoreSinceMs = 0;         // 这次"到点但被拖着"的起点（0 = 没在等）
+        private bool ignoreCounted = false;     // 本轮已经记过一次"忽略"
 
         private List<RestForm> restForms = new List<RestForm>();
         private bool restFormsWarmed = false;   // 是否已在第一个 tick 预热过遮罩窗体
@@ -2837,6 +4124,10 @@ namespace EyeLite
         {
             cfg = AppConfig.Load();
 
+            // 插件宿主必须先拿到配置：IsOn / Get 都靠它。
+            // 这里只存引用，**不会**构造任何插件对象（延迟初始化在 Get 里）。
+            PluginHost.Init(cfg);
+
             iconIdle = MakeIcon(Ui.Accent);
             iconRest = MakeIcon(Color.FromArgb(240, 128, 72));
 
@@ -2933,6 +4224,7 @@ namespace EyeLite
             sedLimitMs = cfg.SedentaryEnabled ? (long)cfg.SedentaryMinutes * 60L * 1000L : 0;
             lastAnchorMs = Clock.NowMs();
             ResetDimRound();       // 新一轮计时：渐暗重新可以出现（上一轮放弃过也不影响这轮）
+            ResetDefer();          // C3/C4 让路状态跟着本轮一起归零
             RefreshRemaining();
             UpdateTrayText();
         }
@@ -3020,7 +4312,15 @@ namespace EyeLite
                     // 休息结束判定看绝对锚点，不看"减一"：Timer 迟到或系统卡顿时，
                     // 休息时间照样是真实流逝的那几秒。
                     // 休息期间**不累加**工作时钟（契约 §5：休息段单独成桶）。
-                    if (now >= restDueMs) { EndRest(true); return; }
+                    if (now >= restDueMs)
+                    {
+                        // 自然坐满 = 真正的休息：完成数 +1，A5 的"连续没休息"清零
+                        CompletedRests++;
+                        cyclesWithoutRest = 0;
+                        CountStatDone();        // F1：完成 +1
+                        EndRest(true);
+                        return;
+                    }
                     RefreshRemaining();
                     UpdateRestUI();
 
@@ -3042,6 +4342,11 @@ namespace EyeLite
                         }
                         catch { }
                     }
+
+                    // B1/B2 仪式小窗必须压在这层遮罩之上。
+                    // 顺序是关键：上面那次 SetWindowPos 会把每块遮罩依次送到置顶组的最前面，
+                    // 所以仪式窗必须在**之后**再抬一次，否则它会在 1 秒内被遮罩盖掉。
+                    try { BringRitualToTop(); } catch { }
                 }
                 else
                 {
@@ -3061,6 +4366,9 @@ namespace EyeLite
                     // 这一弹纯属打扰，还会让人"刚坐下就被弹"。
                     if (idle && IdleSeconds() >= RestTotalSeconds)
                     {
+                        // 离开的时间已经超过一整个休息时长 —— 等同于休息过了，
+                        // A5 的"连续没休息"也要清零（否则回来第一次预告就会莫名响 3 声）。
+                        cyclesWithoutRest = 0;
                         ResetWork();
                         UpdateTrayText();
                         return;
@@ -3113,6 +4421,12 @@ namespace EyeLite
                         // 而渐暗是在正常流程里求值的 —— 不撤就会一直挂在屏幕上，
                         // 压在别人的全屏内容上面（本来"全屏不打扰"就是这个 gate 的意义）。
                         HideDim();
+
+                        // A1 边缘辉光同理：被抑制时不能有任何我们自己的光盖在别人全屏上
+                        HideEdgeGlow();
+
+                        // F1：被抑制导致"到点没弹"也算"忽略"的一条来源（连续 5 分钟才记一次）
+                        UpdateIgnoreStat(now, sedDue || workDue, true);
 
                         // 未到上限、且本轮还没强制放行过 → 继续压住。
                         // 注意这里的 return：抑制期间的"不提醒"是靠它实现的。
@@ -3179,6 +4493,20 @@ namespace EyeLite
                     // DimTick 内部仍保留 resting / previewing / suppressed / paused 的判据做兜底。
                     try { DimTick(); } catch { }
 
+                    // ---- A1：边缘辉光（插件 EdgeGlow，与渐暗同一时机）----
+                    // 未启用时 PluginHost.Get 返回 null → 这里什么都不做，
+                    // 连窗口都不会被创建（"未启用零对象"的落点之一）。
+                    try { RefreshEdgeGlow(); } catch { }
+
+                    // ---- C3 / C4：到点前的"临门一脚"让路 ----
+                    // 每 tick 只算一次（DeferredByActivity 内部会推进"连续命中"的计时）。
+                    // 放在 gate 之后：被抑制的路径已经 return 过，没必要白跑一次进程查询。
+                    bool deferred = DeferredByActivity(now);
+
+                    // F1：「到点了却被让路」要累计到"忽略"（被抑制的那条路径在前面单独记）。
+                    // 放在预告分支之前：预告里到点又被让路的提前 return 也被这句覆盖。
+                    UpdateIgnoreStat(now, sedDue || workDue, deferred);
+
                     // ---- 预告窗口（P0-B）----
                     // 到点前 PreviewSeconds 秒，横幅出现给三出口。
                     // 判定用**剩余时间**而不是绝对时刻：剩余时间进入 [0, 预览窗口] 即进预告。
@@ -3188,6 +4516,14 @@ namespace EyeLite
                         if (sedDue || workDue)
                         {
                             EndPreview();
+                            if (deferred)
+                            {
+                                // 正在看片 / 正在打字：先把横幅收掉，别挂着；
+                                // 让路结束后（deferred 变 false）下面会自己重新进预告或直接开休息。
+                                RefreshRemaining();
+                                UpdateTrayText();
+                                return;
+                            }
                             BeginRest(sedDue);
                             return;
                         }
@@ -3205,11 +4541,13 @@ namespace EyeLite
                         return;
                     }
 
-                    if (sedDue) { BeginRest(true); return; }
-                    if (workDue) { BeginRest(false); return; }
+                    if (sedDue && !deferred) { BeginRest(true); return; }
+                    if (workDue && !deferred) { BeginRest(false); return; }
 
                     // 进预告窗口了吗？
-                    if (!paused && !idle && cfg.PreviewSeconds > 0)
+                    // deferred 期间不许再进预告：否则"弹出→到点被让路收掉→下一 tick 又弹"
+                    // 会变成每秒闪一次的横幅。
+                    if (!paused && !idle && !deferred && cfg.PreviewSeconds > 0)
                     {
                         long win = (long)cfg.PreviewSeconds * 1000L;
                         long workLeft = workLimitMs - workAccumMs;
@@ -3297,6 +4635,294 @@ namespace EyeLite
         }
 
         // ================================================================
+        // C3 / C4：到点前的"临门一脚"让路
+        // ================================================================
+        //
+        // 这两条和 P0-C 的 QUNS gate 是同一类需求（别在错误时机弹），但覆盖另一批场景：
+        //   C3 前台白名单：窗口化看片、PotPlayer 非全屏、OBS 预览 —— QUNS 全都查不到，
+        //                  可弹全屏遮罩同样是把人从剧情里硬拽出来。
+        //   C4 打字段：用户正在连续敲键（idle < 300ms），这一刻打断的代价是"思路断了"，
+        //              晚 5 秒再提醒的代价只是"晚 5 秒"。
+        //
+        // 两者都不许变成"永不提醒"的后门：C3 连续命中封顶 10 分钟、C4 封顶 60 秒，
+        // 到点还没让开就照常弹。
+
+        /// <summary>
+        /// 返回 true 表示"这次先不弹"。副作用：更新 deferUntilMs 与两个 since 时间戳。
+        /// **每个 tick 只该调一次**（它内部会推进"连续命中"的计时）。
+        /// </summary>
+        private bool DeferredByActivity(long now)
+        {
+            // 只有"真的快到了"才值得查一次前台进程（Process 查询 + 一次 P/Invoke 都不便宜）。
+            // 离到点还早就直接返回 false，并把连续命中计时清零 —— 否则用户看两小时电影
+            // 会白跑七千次进程查询。
+            if (!IsNearDue())
+            {
+                ResetDefer();
+                return false;
+            }
+
+            long until = 0;
+
+            // ---- C3：前台进程白名单（一次让 60 秒，连续命中累计最多 10 分钟）----
+            //
+            // c3DeferSinceMs 记的是**第一次命中白名单**的时刻，0 表示"当前没在命中"。
+            // 封顶必须用它算，绝不能用 now 反复重置 —— 否则每 tick 都"重新计时"，
+            // 10 分钟上限永远到不了，白名单就成了"永不提醒"的后门。
+            if (cfg.ForegroundGuardEnabled && IsForegroundWhitelisted())
+            {
+                if (c3DeferSinceMs == 0) c3DeferSinceMs = now;
+                long capEnd = c3DeferSinceMs + 10L * 60L * 1000L;
+                long want = now + 60L * 1000L;
+                until = want < capEnd ? want : capEnd;
+            }
+            else
+            {
+                c3DeferSinceMs = 0;     // 条件一断（离开白名单进程）就重新开始算"连续"
+            }
+
+            // ---- C4：正在连续打字（一次让 5 秒，连续命中累计最多 60 秒）----
+            if (cfg.TypingGuardEnabled && RawIdleMs() < 300)
+            {
+                if (c4DeferSinceMs == 0) c4DeferSinceMs = now;
+                long capEnd = c4DeferSinceMs + 60L * 1000L;
+                long want = now + 5L * 1000L;
+                long u2 = want < capEnd ? want : capEnd;
+                // 取较大的那个：看片和打字完全可能同时成立，不能让后算的覆盖先算的
+                if (u2 > until) until = u2;
+            }
+            else
+            {
+                c4DeferSinceMs = 0;
+            }
+
+            deferUntilMs = until;
+            return deferUntilMs > now;
+        }
+
+        /// <summary>
+        /// 是否进入"该考虑让路"的时间窗：到点，或已经进了预告窗口。
+        /// PreviewSeconds=0 时窗口宽度是 0，只有真正到点才返回 true。
+        /// </summary>
+        private bool IsNearDue()
+        {
+            long win = (long)cfg.PreviewSeconds * 1000L;
+            if (workLimitMs > 0 && workLimitMs - workAccumMs <= win) return true;
+            if (cfg.SedentaryEnabled && sedLimitMs > 0 && sedLimitMs - sedAccumMs <= win) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// 当前前台窗口的进程名是否在白名单里。
+        ///
+        /// 口径（与测试侧约定一致，改任何一条都会让 C3 用例假 FAIL）：
+        ///   · 白名单 = 分号分隔的 **basename，含扩展名**（vlc.exe）
+        ///   · 取进程名 = GetProcessById(pid).ProcessName + ".exe"
+        ///   · 匹配 = 大小写不敏感（OrdinalIgnoreCase），两侧都 Trim
+        ///   · **空字符串 = 白名单为空 = 永不命中**（不是"全部命中"）
+        ///   · 取进程名失败 / 进程已退出 / 任何异常 → 视为**不在白名单**（fail-open：
+        ///     探测不到就照常提醒，绝不能因为一个查询异常让人永远收不到提醒）
+        /// </summary>
+        private bool IsForegroundWhitelisted()
+        {
+            string list = cfg.ForegroundWhitelist;
+            // 空 = 永不命中。测试的对照组就靠这个（白名单为空必须照常提醒）
+            if (list == null || list.Length == 0) return false;
+
+            try
+            {
+                IntPtr h = GetForegroundWindow();
+                if (h == IntPtr.Zero) return false;
+
+                uint pid;
+                GetWindowThreadProcessId(h, out pid);
+                if (pid == 0) return false;
+                if (pid == GetCurrentProcessId()) return false;   // 自己永远不在白名单里
+
+                string name;
+                // using 是硬要求：Process 持有进程句柄，不 Dispose 就是"每秒一个句柄"的泄漏
+                using (System.Diagnostics.Process p =
+                       System.Diagnostics.Process.GetProcessById((int)pid))
+                {
+                    name = p.ProcessName + ".exe";
+                }
+                if (name == null || name.Length == 0) return false;
+
+                return MatchWhitelist(list, name);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// 白名单匹配：分号分隔、逐项 Trim、大小写不敏感（OrdinalIgnoreCase）。
+        /// 单独成方法只是为了能一眼看清"匹配只有这一条规则"。
+        /// </summary>
+        private static bool MatchWhitelist(string list, string exeName)
+        {
+            string target = exeName == null ? "" : exeName.Trim();
+            if (target.Length == 0) return false;
+
+            string[] parts = list.Split(';');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string s = parts[i].Trim();
+                if (s.Length == 0) continue;
+                if (string.Equals(s, target, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>让路状态归零：一轮真正结束（开始休息 / 跳过 / 推迟 / 重置周期）时调。</summary>
+        private void ResetDefer()
+        {
+            deferUntilMs = 0;
+            c3DeferSinceMs = 0;
+            c4DeferSinceMs = 0;
+        }
+
+        /// <summary>
+        /// A5 仪式音的重复次数 = 紧迫度。
+        ///
+        /// 1 + min(2, 距上次真正完成休息已经过去的完整周期数)，封顶 3 声。
+        /// 周期数取两个来源里较大的那个：
+        ///   · cyclesWithoutRest —— 跳过 / 推迟 都会 +1（真正的"拖了几轮"）
+        ///   · workAccumMs / workLimitMs —— 过点后还在被让路时 ≥1（"这轮已经超时了"）
+        /// 只用后者是不够的：跳过会把 workAccumMs 清零，光看它永远算出 0 周期。
+        /// </summary>
+        private int RitualRepeatCount()
+        {
+            int cycles = cyclesWithoutRest;
+
+            if (workLimitMs > 0)
+            {
+                long overdue = workAccumMs / workLimitMs;
+                if (overdue > cycles)
+                {
+                    if (overdue > 2) cycles = 2;
+                    else cycles = (int)overdue;
+                }
+            }
+
+            if (cycles < 0) cycles = 0;
+            if (cycles > 2) cycles = 2;
+            return 1 + cycles;
+        }
+
+        // ================================================================
+        // P1 批 2：三个可视化/统计插件的接线（插件本身在自己的类里，这里只做"何时调用"）
+        // ================================================================
+        //
+        // 所有入口都是**先 Get 再判空**：插件没启用时 Get 返回 null，
+        // 于是这里连一个对象都不会被创建、一个 Timer 都不会被注册。
+
+        /// <summary>
+        /// A1 EdgeGlow 的显示窗口：与 A2 渐暗同一时机 —— 剩余 0~60 秒，
+        /// 且不在休息 / 预告 / 抑制 / 暂停 / 长空闲中。
+        /// 被 C3/C4 让路时 left ≤ 0，自然也落在窗口外（不会一直亮着）。
+        /// </summary>
+        private bool GlowWindowOpen()
+        {
+            if (isResting || isPreviewing || isSuppressed || paused) return false;
+            if (IsIdleTooLong()) return false;
+
+            long left, total;
+            if (!PickMostUrgentClock(out left, out total)) return false;
+            return left > 0 && left <= 60000;
+        }
+
+        private void RefreshEdgeGlow()
+        {
+            EdgeGlowPlugin p = PluginHost.Get("EdgeGlow") as EdgeGlowPlugin;
+            if (p == null) return;
+            p.SetWindow(GlowWindowOpen());
+        }
+
+        private void HideEdgeGlow()
+        {
+            EdgeGlowPlugin p = PluginHost.Get("EdgeGlow") as EdgeGlowPlugin;
+            if (p != null) p.HideNow();
+        }
+
+        private void ShowRitualForRest()
+        {
+            RitualPlugin p = PluginHost.Get("Ritual") as RitualPlugin;
+            if (p != null) p.ShowForRest();
+        }
+
+        private void HideRitual()
+        {
+            RitualPlugin p = PluginHost.Get("Ritual") as RitualPlugin;
+            if (p != null) p.Hide();
+        }
+
+        /// <summary>
+        /// 把仪式小窗重新抬到置顶组最前面（休息期间每秒一次）。
+        /// 遮罩那边每秒都会重申 TopMost，不抬这一下小窗就会被遮罩盖掉。
+        /// </summary>
+        private void BringRitualToTop()
+        {
+            RitualPlugin p = PluginHost.Get("Ritual") as RitualPlugin;
+            if (p == null) return;
+
+            IntPtr h = p.WindowHandle;
+            if (h == IntPtr.Zero) return;
+
+            SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        }
+
+        // ---- F1 计数入口：Get 为 null（插件没启用）时整段都不执行 ----
+
+        private void CountStatDone()
+        {
+            StatsPlugin p = PluginHost.Get("Stats") as StatsPlugin;
+            if (p != null) p.BumpDone(cfg);
+        }
+
+        private void CountStatSkip()
+        {
+            StatsPlugin p = PluginHost.Get("Stats") as StatsPlugin;
+            if (p != null) p.BumpSkip(cfg);
+        }
+
+        private void CountStatIgnore()
+        {
+            StatsPlugin p = PluginHost.Get("Stats") as StatsPlugin;
+            if (p != null) p.BumpIgnore(cfg);
+        }
+
+        /// <summary>
+        /// F1「忽略」判定：到点了、但既没坐满也没点跳过（被 C3/C4 让路或被抑制），
+        /// **连续**拖过 5 分钟就记一次，同一轮只记一次。
+        ///
+        /// 每个 tick 只能调一次（它内部推进 ignoreSinceMs）。
+        /// 一旦不再"到点且被拖"（弹了遮罩 / 让路结束 / 用户跳过），计时立刻归零 ——
+        /// 所以"拖 4 分钟 → 正常弹 → 又拖 4 分钟"不会误记成一次忽略。
+        /// </summary>
+        private void UpdateIgnoreStat(long now, bool due, bool held)
+        {
+            if (!due || !held)
+            {
+                ignoreSinceMs = 0;
+                ignoreCounted = false;
+                return;
+            }
+
+            if (ignoreSinceMs == 0)
+            {
+                ignoreSinceMs = now;
+                ignoreCounted = false;
+                return;
+            }
+
+            if (!ignoreCounted && (now - ignoreSinceMs) >= 5L * 60L * 1000L)
+            {
+                ignoreCounted = true;
+                CountStatIgnore();
+            }
+        }
+
+        // ================================================================
         // 预告横幅（P0-B「30 秒预告 + 三出口」）
         // ================================================================
         //
@@ -3334,6 +4960,8 @@ namespace EyeLite
                         // 跳过 = 本轮作废，满周期重新计时
                         if (!isPreviewing) return;
                         EndPreview();
+                        cyclesWithoutRest++;      // A5：又一轮没真正休息，下次仪式音加一声
+                        CountStatSkip();         // F1：跳过 +1
                         ResetWork();
                         UpdateTrayText();
                     };
@@ -3353,6 +4981,9 @@ namespace EyeLite
                 // A2：进预告就把渐暗层撤掉。横幅本身就是"要休息了"的强信号，
                 // 再叠一层变暗既看不清横幅，也像是出了故障。
                 HideDim();
+
+                // A1：边缘辉光同样撤掉（预告已经接管了"该休息了"这件事）
+                HideEdgeGlow();
 
                 // 先把倒计时算出来再 SetCountdown：StartPreview 里不能拿上一轮的
                 // previewRemaining 显示，否则横幅第一帧会闪一个旧值。
@@ -3380,6 +5011,13 @@ namespace EyeLite
                     : (cfg.PomodoroEnabled ? "这一轮番茄钟快结束了" : "快到休息时间了");
                 previewForm.SetCountdown(previewRemaining, bodyText);
                 previewForm.ShowPreview();
+
+                // ---- A5 仪式音（插件 Sound）----
+                // 在"预告刚出现"这一刻响，而不是等遮罩盖上来才响：
+                // 那 30 秒是唯一还来得及让人主动停手的窗口。
+                // 未启用时 PluginHost.Get 返回 null —— 不创建对象、不发声，零影响。
+                RitualSoundPlugin ritual = PluginHost.Get("Sound") as RitualSoundPlugin;
+                if (ritual != null) ritual.PlayRitual(RitualRepeatCount());
             }
             catch
             {
@@ -3445,6 +5083,8 @@ namespace EyeLite
                 sedLimitMs += (long)cfg.PostponeMinutes * 60L * 1000L;
             }
             ResetDimRound();     // 延后 = 本轮重新开始计时，渐暗可以再出现一次
+            ResetDefer();        // C3/C4：额度重新给（延后本身就是"再给我 5 分钟"）
+            cyclesWithoutRest++; // A5：延后也算"这一轮没真正休息"，下次仪式音加一声
             RefreshRemaining();
             UpdateTrayText();
         }
@@ -3464,6 +5104,17 @@ namespace EyeLite
             // A2：渐暗层必须立刻撤掉 —— 它和遮罩叠在一起会让遮罩显得"发灰"，
             // 而且遮罩本来就是主角，渐暗只是到点前的铺垫。
             HideDim();
+
+            // A1：边缘辉光同理，遮罩期间不能再有我们自己的光
+            HideEdgeGlow();
+
+            // C3/C4：休息真的开始了，让路状态归零（下一轮重新给足额度，
+            // 否则"上轮被让了 9 分钟"会吃掉下一轮的预算）
+            ResetDefer();
+
+            // F1：这一轮已经弹出来了，"到点却被拖着"的计时结束（下一轮重新算）
+            ignoreSinceMs = 0;
+            ignoreCounted = false;
 
             // 记下当时的前台窗口，休息结束时若前台被我们占了就还回去。
             // 遮罩是 WS_EX_NOACTIVATE，理论上不会抢，这是点击按钮等情况下的保险。
@@ -3504,9 +5155,33 @@ namespace EyeLite
             tray.Icon = iconRest;
             if (cfg.SoundEnabled) Sfx.PlayStart();
 
+            // B1/B2 休息仪式（插件 Ritual）：遮罩已经摆好之后再弹小窗，
+            // 否则小窗会被随后 Show 出来的全屏遮罩盖住。
+            // 未启用时 Get 返回 null → 不建窗口。
+            //
+            // **只在久坐/活动休息（bodyBreak）时弹**：
+            //   普通护眼休息的目的是"让眼睛离开屏幕"，在屏幕正中弹一个会动的窗口
+            //   等于把视线钉回屏幕上 —— 目的相反，不是文案不一致。
+            //   将来若要"护眼休息也能做眼操"，应该是用户在遮罩上主动点一下，而不是自动弹。
+            if (bodyBreak)
+            {
+                try { ShowRitualForRest(); } catch { }
+            }
+
             // 跳过键由全局钩子兜底（遮罩不抢焦点，KeyDown 永远收不到键）。
             // AllowSkip=false 时不挂回调 —— 否则"禁止跳过"会被这两个键绕过。
-            if (cfg.AllowSkip) KeyboardGuard.OnSkipKey = delegate { EndRest(true); };
+            if (cfg.AllowSkip)
+            {
+                // F1：键盘 Esc / 空格跳过与点「跳过」按钮是同一个动作，必须一起计数。
+                // 计数放在 isResting 判断之后：钩子可能重复投递（key repeat），
+                // 只让第一次算数（与 EndRest 自己的重入守卫同一口径）。
+                KeyboardGuard.OnSkipKey = delegate
+                {
+                    if (!isResting) return;
+                    CountStatSkip();
+                    EndRest(true);
+                };
+            }
             else KeyboardGuard.OnSkipKey = null;
 
             // 钩子有三个维度：跳过键（Esc/空格）、屏蔽系统键、全吞键盘。
@@ -3560,6 +5235,11 @@ namespace EyeLite
             if (!isResting) return;            // 重入守卫：钩子 / 窗体 KeyDown / 按钮可能重复触发
             isResting = false;
 
+            // C3/C4：遮罩一关，让路状态就必须归零。
+            // 跳过（resetWork=true）本来会经 ResetWork 清掉，但推迟（resetWork=false）不会，
+            // 所以在这里统一清一次 —— 上一轮残留的 deferUntilMs 会把下一轮也推迟。
+            ResetDefer();
+
             // 计时状态必须立刻复位：即使后面任何一步 UI 操作抛异常，
             // 也不会出现 workRemaining <= 0 导致下一秒再次 BeginRest 的"休息死循环"。
             if (resetWork)
@@ -3571,6 +5251,9 @@ namespace EyeLite
             //（否则后续 key-repeat 会漏进下层文档），2 秒兜底强制卸载。
             try { KeyboardGuard.RequestUninstall(); } catch { }
             KeyboardGuard.OnSkipKey = null;   // 卸载后再清，避免静态字段长期持有 TrayApp
+
+            // B1/B2 休息仪式：休息一结束就关窗并释放（它是一次性的，不复用）
+            try { HideRitual(); } catch { }
 
             for (int i = 0; i < restForms.Count; i++)
             {
@@ -3645,14 +5328,30 @@ namespace EyeLite
                 // 所有屏幕都给按钮：只在主屏给按钮会让副屏内容块更矮，
                 // 两块屏的垂直居中对不齐，观感很差。
                 bool withButtons = true;
-                RestForm f = new RestForm(screens[i], cfg.AllowSkip, cfg.PostponeMinutes, withButtons);
-                f.RequestSkip += delegate { EndRest(true); };
+                RestForm f = new RestForm(screens[i], cfg.AllowSkip, cfg.PostponeMinutes, withButtons,
+                                          cfg.SittingOptionEnabled);
+                f.RequestSkip += delegate
+                {
+                    if (!isResting) return;   // 防重复计数（连点两下按钮）
+                    cyclesWithoutRest++;      // A5：遮罩上点跳过也算"这一轮没真休息"
+                    CountStatSkip();          // F1：跳过 +1
+                    EndRest(true);
+                };
                 f.RequestPostpone += delegate
                 {
                     EndRest(false);
                     // 推迟 = 本轮**不结束**，只改到期时刻（契约 §3），计数不清零。
                     // 与预告横幅上的「延后」共用同一段逻辑，避免两处语义分叉。
                     PostponeWork();
+                };
+                // G3「坐一分钟」：本轮**立即结束**（等价于跳过的那套收尾：重置计时 + 卸载钩子），
+                // 但**计入完成数** —— 用户确实坐了，只是没坐满，这不是"没休息"。
+                f.RequestSitting += delegate
+                {
+                    if (!isResting) return;   // 防重复计数
+                    CompletedRests++;
+                    CountStatDone();          // F1：坐一分钟也计为完成
+                    EndRest(true);
                 };
                 restForms.Add(f);
             }
@@ -4155,6 +5854,9 @@ namespace EyeLite
                 try { restForms[i].Close(); restForms[i].Dispose(); } catch { }
             }
             restForms.Clear();
+            // P1：已启用的插件必须走一遍 OnDisable（停 Timer / 释放 GDI），
+            // 否则退出瞬间还在响的仪式音会跟着窗口一起"半死"。
+            try { PluginHost.DisposeAll(); } catch { }
             DestroyLastIconHandle();    // A3：进度环的 HICON 是我们自己建的，必须自己销毁
             try { tray.Visible = false; tray.Dispose(); } catch { }
             ExitThread();
@@ -4174,6 +5876,7 @@ namespace EyeLite
                     try { restForms[i].Dispose(); } catch { }
                 }
                 restForms.Clear();
+                try { PluginHost.DisposeAll(); } catch { }
                 DestroyLastIconHandle();
                 if (timer != null) timer.Dispose();
                 if (tray != null) tray.Dispose();

@@ -110,11 +110,19 @@ def main():
         return 2
 
     filters = sys.argv[1:]
-    src_md5 = md5(SRC)
+    exe_md5 = md5(EXE)
     exe_size = os.path.getsize(EXE)
+    src_size = os.path.getsize(SRC)
+    src_md5 = md5(SRC)
     print('=' * 72)
-    print('产物指纹: EyeLite.exe %d bytes | Program.cs md5 %s' % (exe_size, src_md5))
+    print('被测产物: EyeLite.exe %d bytes | md5 %s' % (exe_size, exe_md5))
+    print('参考源码: Program.cs %d bytes | md5 %s（仅供追溯，不作为有效性依据）'
+          % (src_size, src_md5))
     print('=' * 72)
+
+    # 有效性依据只看 **exe**：源码可能在测试期间被另一路并行修改，
+    # 拿源码 md5 判定"结果是否有效"会产生必然的假警报（踩过）。
+    print('>> 有效性依据 = exe 的 size+md5 在整轮运行中不变；源码 md5 变化不影响结论。')
 
     stop_eyelite()
     raw = read_bytes()
@@ -177,7 +185,7 @@ def main():
                 f.write(raw)
             print('\nconfig 已还原: %d bytes (备份 %d bytes)' % (os.path.getsize(CFG), len(raw)))
 
-    src_md5_end = md5(SRC)
+    exe_md5_end = md5(EXE)
     exe_size_end = os.path.getsize(EXE)
 
     print('\n' + '=' * 72)
@@ -194,9 +202,10 @@ def main():
 
     ok = sum(1 for r in results if r[1] == 0)
     print('\n通过 %d/%d 个脚本' % (ok, len(results)))
-    print('\n产物指纹（运行后复核）: exe %d bytes | md5 %s %s'
-          % (exe_size_end, src_md5_end,
-             '(未变 OK)' if (src_md5_end == src_md5 and exe_size_end == exe_size) else '(已变!! 结果无效)'))
+    unchanged = (exe_md5_end == exe_md5 and exe_size_end == exe_size)
+    print('\n被测产物（运行后复核）: exe %d bytes | md5 %s %s'
+          % (exe_size_end, exe_md5_end,
+             '(未变 OK，本报告有效)' if unchanged else '(已变!! 本报告作废)'))
     return 0 if ok == len(results) else 1
 
 
