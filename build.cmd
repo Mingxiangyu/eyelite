@@ -37,6 +37,12 @@ echo   [OK] Build succeeded
 for %%F in (EyeLite.exe) do echo   File: EyeLite.exe   Size: %%~zF bytes
 echo ============================================
 echo.
+echo   ---- Build fingerprint (include this when reporting a problem) ----
+for %%F in ("src\Program.cs") do echo   Source: %%~tF   %%~zF bytes
+for %%F in ("EyeLite.exe") do echo   Output: %%~tF   %%~zF bytes
+certutil -hashfile "src\Program.cs" MD5 2>nul | findstr /v "CertUtil"
+echo   ------------------------------------------------------------------
+echo.
 set "RUNNOW="
 set /p RUNNOW=Start EyeLite now? (Y/N):
 if /i "%RUNNOW%"=="Y" start "" "EyeLite.exe"
