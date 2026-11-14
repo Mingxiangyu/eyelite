@@ -98,8 +98,11 @@ function Show-Row {
 
 # ---------------------------------------------------------------- metadata
 
-Write-Host "Managed identifiers (absent = build predates that change):"
+Write-Host "Managed identifiers:"
 
+# Direction matters per row:
+#   floor   - FOUND proves the build is AT LEAST that new; absence is the useful signal
+#   ceiling - FOUND proves the build is OLDER than the removal; presence is the useful signal
 $ids = @(
     @{ Name = "DetectScale";           Meaning = "DPI scaling (Sc())" },
     @{ Name = "SetBackdrop";           Meaning = "ring repaints parent background" },
@@ -109,7 +112,8 @@ $ids = @(
     @{ Name = "RequestUninstall";      Meaning = "drain fix, keyup keepalive" },
     @{ Name = "drainVk";               Meaning = "drain fix state" },
     @{ Name = "IsDraining";            Meaning = "on-tick drain backstop" },
-    @{ Name = "SetWindowPos";          Meaning = "re-assert topmost every tick" }
+    @{ Name = "SetWindowPos";          Meaning = "re-assert topmost every tick" },
+    @{ Name = "set_KeyPreview";        Meaning = "CEILING: KeyPreview assignment, removed after v1.1.1 tag" }
 )
 
 $seen = @{}
@@ -153,6 +157,13 @@ if (-not $seen["DetectScale"]) {
     Write-Host "  Contains the drain fix."
     if ($seen["IsDraining"] -and $seen["SetWindowPos"]) {
         Write-Host "  Also has the on-tick backstop and the topmost re-assert: v1.1.1 class."
+        if ($seen["set_KeyPreview"]) {
+            Write-Host "  Still assigns KeyPreview -> matches tag v1.1.1 (0360834, 2300 lines)."
+            Write-Host "  The post-tag cleanup (volatile, dead property removal) is NOT in this build."
+        } else {
+            Write-Host "  No KeyPreview assignment -> matches the post-tag cleanup"
+            Write-Host "  (478fc5f, 2305 lines): volatile + removed dead property."
+        }
     } else {
         Write-Host "  Missing the on-tick backstop and/or topmost re-assert: pre-v1.1.1 final."
     }
@@ -163,6 +174,9 @@ if (-not $seen["UpdateStrictText"]) {
 }
 
 Write-Host ""
-Write-Host "Note: a FOUND row only proves the build is at least that new;"
-Write-Host "      an absent row is the reliable signal."
+Write-Host "Note: rows are directional. For floor rows a FOUND only proves the build is at"
+Write-Host "      least that new, so absence is the signal. For ceiling rows (set_KeyPreview)"
+Write-Host "      presence is the signal: it proves the build still has the removed line."
+Write-Host "      Chinese needles must be built from code points, never typed by hand:"
+Write-Host "      U+00B7 / U+2022 / U+30FB look identical on screen and silently miss."
 Write-Host ""
