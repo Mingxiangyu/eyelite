@@ -36,6 +36,14 @@ Windows 低级键盘钩子按「最后安装的最先调用」执行；任一钩
 
 配对性为什么重要：若 EyeLite 只吞了 down 没吞 up（或反之），应用侧就会
 认为 Ctrl 一直按着 —— 这正是用户报告过的「ctrl 一直卡住」的根因形态。
+
+**踩坑记录 4（2026-11-14，新 build）**：A2 的 DimForm（休息前 60 秒渐进压暗）铺满整块
+屏幕，尺寸同样 w>800 h>500，WorkMinutes=1 时启动后 ~1 秒就出现。只按尺寸判遮罩会把它
+当成"遮罩已弹出"，于是 wait_overlay 立刻返回、探针打在**压暗层**上而不是休息期，
+判定全部失真。区分依据（源码 2146-2196 vs 1264-1320）：
+  · DimForm：带 WS_EX_TRANSPARENT(0x20，鼠标穿透) 且**没有子窗口**
+  · RestForm：有 Label / RingMeter / 按钮，**子窗口 >= 1**，且无 TRANSPARENT
+压暗层单独记为信息项（dim），不参与 PASS/FAIL。
 """
 
 import ctypes
@@ -52,6 +60,31 @@ CFG = os.path.join(CFG_DIR, 'config.ini')
 
 user32 = ctypes.WinDLL('user32', use_last_error=True)
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+# ---- 遮罩判据的两个辅助（见顶部踩坑记录 4）----
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+user32.GetWindowLongW.restype = ctypes.c_long
+user32.GetWindowLongW.argtypes = [wt.HWND, ctypes.c_int]
+
+DIM_SEEN = [False]       # 压暗层是否出现过（信息项，不参与判定）
+
+
+def ex_style(hwnd):
+    return user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+
+
+def child_count(hwnd):
+    """子窗口数：遮罩里有 Label / 环形 / 按钮，压暗层一个都没有。"""
+    n = [0]
+    Enum = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+
+    def cb(ch, lparam):
+        n[0] += 1
+        return True
+
+    user32.EnumChildWindows(hwnd, Enum(cb), 0)
+    return n[0]
 
 # ---------------- Win32 常量 ----------------
 WH_KEYBOARD_LL = 13
@@ -292,7 +325,12 @@ def stop_eyelite():
 
 
 def overlay_present():
-    """按 PID 判定 EyeLite 遮罩是否出现（必须排除 Windows 桌面窗口）。"""
+    """按 PID 判定 EyeLite 遮罩是否出现（必须排除 Windows 桌面窗口 + 压暗层）。
+
+    压暗层（DimForm）铺满屏幕但带 WS_EX_TRANSPARENT 且无子窗口；遮罩（RestForm）
+    有 Label / 环形 / 按钮。只按尺寸判会让 wait_overlay 在启动 1 秒后就返回，
+    探针全打在压暗层上 —— 判定会整体失真（踩坑记录 4）。
+    """
     pids = set(eyelite_pids())
     if not pids:
         return False
@@ -308,7 +346,10 @@ def overlay_present():
             r = wt.RECT()
             if user32.GetWindowRect(hwnd, ctypes.byref(r)):
                 if (r.right - r.left) > 800 and (r.bottom - r.top) > 500:
-                    found[0] = True
+                    if ex_style(hwnd) & WS_EX_TRANSPARENT:
+                        DIM_SEEN[0] = True        # 压暗层：信息项，不算遮罩
+                    elif child_count(hwnd) >= 1:
+                        found[0] = True
         return True
 
     user32.EnumWindows(EnumProc(cb), 0)
@@ -464,6 +505,11 @@ def main():
     print()
     for name, ok, detail in results:
         print('%-44s %s  %s' % (name, 'PASS' if ok else 'FAIL', detail))
+
+    # 压暗层信息项：让后来的人看到 dim=yes 时不会把它当成遮罩
+    print('%-44s %s  %s' % ('压暗层 DimForm（信息项，不计分）',
+                            'yes' if DIM_SEEN[0] else 'no',
+                            '出现过，但它不是遮罩（TRANSPARENT 且无子窗口）'))
 
     core = [r for r in results if not r[0].startswith('T3 ')]
     npass = sum(1 for r in core if r[1])

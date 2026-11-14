@@ -20,10 +20,19 @@ P0-B 真机实测：30 秒预告 + 三出口。
 用法：python tools/p0b-preview-check.py [轮数]
 前置：config.ini 里 WorkMinutes=1 / PreviewSeconds=10 / RestSeconds=8 /
       PomodoroEnabled=0 / IdleMinutes=0 / SedentaryEnabled=0。
+
+**踩坑记录（2026-11-14，新 build）**：A2 的 DimForm（休息前 60 秒渐进压暗）铺满整块
+屏幕，尺寸同样 w>800 h>500，WorkMinutes=1 时启动后 ~1 秒就出现。只按尺寸判遮罩会把它
+当成遮罩，于是"T4 到点转遮罩"在预览期就误判成功、T1 的时间差也跟着乱。区分依据
+（源码 2146-2196 vs 1264-1320）：
+  · DimForm：带 WS_EX_TRANSPARENT(0x20，鼠标穿透) 且**没有子窗口**
+  · RestForm：有 Label / RingMeter / 按钮，**子窗口 >= 1**，且无 TRANSPARENT
+压暗层单独记为信息项（dim），不参与 PASS/FAIL。
 """
 
 import ctypes
 import ctypes.wintypes as wt
+import atexit
 import os
 import subprocess
 import sys
@@ -33,16 +42,51 @@ import time
 # INFUNCTYPE 的 argtypes 个数必须与回调形参个数一致：多写一个 HWND 会让 ctypes
 # 传 4 个实参，回调每次都抛 TypeError，而 ctypes 把回调里的异常**静默吞掉**，
 # 表现就是"钩子装上了但永远收不到事件"（2026-11-14 实测踩过）。
-HOOKPROC_T = ctypes.WINFUNCTYPE(ctypes.c_longlong, ctypes.c_int,
-                                wt.WPARAM, wt.LPARAM)
+#
+# **wintypes.LPARAM 是 32 位 LONG**，不能直接用来接 64 位钩子参数：keyup 的
+# lParam 带高位（0xC0000001），按 32 位转换会 OverflowError，回调抛异常 →
+# ctypes 返回 0 → 这个观察钩子把每个 keyup **吞掉不往下传**（会留卡键，
+# 与"只观测不干预"的目标完全相反）。所以 WPARAM/LPARAM 一律用 size_t/ssize_t。
+LRESULT_T = ctypes.c_ssize_t
+WPARAM_T = ctypes.c_size_t
+LPARAM_T = ctypes.c_ssize_t
+HOOKPROC_T = ctypes.WINFUNCTYPE(LRESULT_T, ctypes.c_int, WPARAM_T, LPARAM_T)
 
 user32 = ctypes.WinDLL('user32', use_last_error=True)
 user32.SetWindowsHookExW.restype = wt.HANDLE
 user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC_T, wt.HINSTANCE, wt.DWORD]
 user32.UnhookWindowsHookEx.argtypes = [wt.HANDLE]
-user32.CallNextHookEx.restype = ctypes.c_longlong
+user32.CallNextHookEx.restype = LRESULT_T
+# argtypes 必须显式声明（原来只有 restype）：不声明就会按 32 位 int 转换 lparam，
+# keyup 的 0xC0000001 直接 OverflowError。
+user32.CallNextHookEx.argtypes = [wt.HANDLE, ctypes.c_int, WPARAM_T, LPARAM_T]
 
 EYELITE_PID = [0]
+
+# ---- 遮罩判据的两个辅助（见顶部踩坑记录）----
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+user32.GetWindowLongW.restype = ctypes.c_long
+user32.GetWindowLongW.argtypes = [wt.HWND, ctypes.c_int]
+
+DIM_SEEN = [False]       # 压暗层是否出现过（信息项，不参与判定）
+
+
+def ex_style(hwnd):
+    return user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+
+
+def child_count(hwnd):
+    """子窗口数：遮罩里有 Label / 环形 / 按钮，压暗层一个都没有。"""
+    n = [0]
+    Enum = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+
+    def cb(ch, lparam):
+        n[0] += 1
+        return True
+
+    user32.EnumChildWindows(hwnd, Enum(cb), 0)
+    return n[0]
 
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
@@ -162,8 +206,18 @@ def eyelite_windows():
 
 
 def overlay_windows():
-    """全屏休息遮罩：可见 + 大尺寸。"""
-    return [w for w in eyelite_windows() if w['visible'] and w['w'] > 800 and w['h'] > 500]
+    """全屏休息遮罩：可见 + 大尺寸 + 非压暗层（见踩坑记录）。"""
+    out = []
+    for w in eyelite_windows():
+        if not (w['visible'] and w['w'] > 800 and w['h'] > 500):
+            continue
+        if ex_style(w['hwnd']) & WS_EX_TRANSPARENT:
+            DIM_SEEN[0] = True          # 压暗层：信息项，不算遮罩
+            continue
+        if child_count(w['hwnd']) < 1:
+            continue
+        out.append(w)
+    return out
 
 
 def preview_windows():
@@ -238,6 +292,74 @@ def start_eyelite(exe):
     return pid
 
 
+# ---------------------------------------------------------------- 配置
+#
+# 前置配置由脚本**自己写**、跑完按**原始字节**还原。
+# 原来只在 docstring 里写"前置"，直接跑会用用户的真实配置（WorkMinutes=20），
+# 120s 内不会出现预告横幅 → 两轮全 FAIL，看起来像产品缺陷（2026-11-14 实测踩过）。
+
+CFG_DIR = os.path.join(os.environ.get('APPDATA', ''), 'EyeLite')
+CFG = os.path.join(CFG_DIR, 'config.ini')
+
+CFG_ORDER = ['WorkMinutes', 'RestSeconds', 'PomodoroEnabled', 'PomodoroWork',
+             'PomodoroRest', 'AllowSkip', 'PostponeMinutes', 'IdleMinutes',
+             'SoundEnabled', 'StrictMode', 'StartWithWindows', 'PreviewSeconds',
+             'SedentaryEnabled', 'SedentaryMinutes', 'SedentarySeconds',
+             'CameraCountEnabled', 'SuppressOnFullscreen', 'DimAlphaMax']
+
+
+def read_cfg_raw():
+    try:
+        with open(CFG, 'rb') as f:
+            return f.read()
+    except Exception:
+        return b''
+
+
+def read_cfg():
+    d = {}
+    try:
+        with open(CFG, 'r', encoding='utf-8-sig') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or line.startswith('['):
+                    continue
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                    d[k.strip()] = v.strip()
+    except Exception as e:
+        print('  read_cfg failed:', e)
+    return d
+
+
+def write_cfg(d):
+    if not os.path.isdir(CFG_DIR):
+        os.makedirs(CFG_DIR)
+    with open(CFG, 'w', encoding='utf-8') as f:
+        f.write('# EyeLite config\n[General]\n')
+        for k in CFG_ORDER:
+            if k in d:
+                f.write('%s=%s\n' % (k, d[k]))
+        for k in d:                      # 未知键也写回，不能弄丢用户配置
+            if k not in CFG_ORDER:
+                f.write('%s=%s\n' % (k, d[k]))
+
+
+_RESTORED = [False]
+
+
+def restore_cfg_raw(raw):
+    """按原始字节还原（幂等：显式调用一次 + atexit 兜底各一次，只生效一次）。"""
+    if not raw or _RESTORED[0]:
+        return
+    _RESTORED[0] = True
+    with open(CFG, 'wb') as f:
+        f.write(raw)
+    print('[env] config restored: %d bytes (backup %d bytes, %s)'
+          % (os.path.getsize(CFG), len(raw),
+             'OK' if os.path.getsize(CFG) == len(raw) else 'SIZE MISMATCH!'))
+
+
 def main():
     rounds = 2
     if len(sys.argv) > 1:
@@ -254,6 +376,18 @@ def main():
 
     print('[env] exe = %s' % exe)
     print('[env] rounds = %d' % rounds)
+
+    # 前置配置自备（见上面的说明）。用 atexit 兜底：即使中途异常退出，
+    # 也会按原始字节把用户的 config.ini 写回去。
+    raw = read_cfg_raw()
+    cfg = read_cfg()
+    cfg.update({'WorkMinutes': '1', 'PreviewSeconds': '10', 'RestSeconds': '8',
+                'PomodoroEnabled': '0', 'IdleMinutes': '0',
+                'SedentaryEnabled': '0', 'SoundEnabled': '0'})
+    write_cfg(cfg)
+    print('[env] config: WorkMinutes=1 PreviewSeconds=10 RestSeconds=8 '
+          'IdleMinutes=0（脚本自备前置，结束按原始字节还原）')
+    atexit.register(restore_cfg_raw, raw)
 
     results = []
 
@@ -345,6 +479,7 @@ def main():
 
     stop_eyelite()
     uninstall_observer()
+    restore_cfg_raw(raw)
 
     print('\n================ 汇总 ================')
     allok = True
@@ -352,6 +487,10 @@ def main():
         print('  %-30s %s   %s' % (name, 'PASS' if ok else 'FAIL', detail))
         if not ok:
             allok = False
+    # 压暗层信息项：让后来的人看到 dim=yes 时不会把它当成遮罩
+    print('  %-30s %s   %s' % ('压暗层 DimForm（信息项，不计分）',
+                               'yes' if DIM_SEEN[0] else 'no',
+                               '出现过，但它不是遮罩（TRANSPARENT 且无子窗口）'))
     print('  OVERALL: %s' % ('PASS' if allok else 'FAIL'))
     return 0 if allok else 1
 

@@ -195,7 +195,7 @@ namespace EyeLite
         private static extern int GetDeviceCaps(IntPtr hdc, int index);
 
         /// <summary>设置面板上显示的版本号；发布时与 git tag 同步，只改这一处。</summary>
-        public const string AppVersion = "v1.1.2";
+        public const string AppVersion = "v1.2.0";
 
         /// <summary>圆角矩形路径。调用方负责 Dispose。</summary>
         public static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -1000,12 +1000,59 @@ namespace EyeLite
             catch { return -1; }
         }
 
+        // 测试钩子之二（P0-C-8 可测）：EYE_LITE_FORCE_QUNS_FILE 指向一个文本文件，
+        // **每次 Query() 都重读文件内容**，内容是 0..6 的整数时优先于 EYE_LITE_FORCE_QUNS。
+        //
+        // 为什么需要它：Win32 不允许一个进程改另一个进程的环境变量，
+        // 所以进程起来之后没法把 QUNS 从 4（全屏）改成 0（正常），
+        // "抑制解除后立刻补弹"这条用例就只能靠这个文件钩子来驱动。
+        //
+        // 只在初始化时读一次路径；路径为空（未设）时每次 Query 只是一次字符串长度判断，
+        // 不产生任何文件 I/O —— 不设该环境变量时零影响。
+        private static readonly string forcedFile = ReadForcedFile();
+
+        private static string ReadForcedFile()
+        {
+            try
+            {
+                string s = Environment.GetEnvironmentVariable("EYE_LITE_FORCE_QUNS_FILE");
+                if (string.IsNullOrEmpty(s)) return "";
+                return s;
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>读文件钩子当前的值；没设路径 / 文件不在 / 内容非法一律返回 -1（= 不生效）。</summary>
+        private static int ReadForcedFromFile()
+        {
+            if (forcedFile.Length == 0) return -1;
+            try
+            {
+                if (!File.Exists(forcedFile)) return -1;
+                string s = File.ReadAllText(forcedFile, Encoding.UTF8).Trim();
+                // 有些脚本写文件会留 UTF-8 BOM，而 Trim 不把 U+FEFF 当空白 ——
+                // 不剥掉就会 TryParse 失败、钩子静默失效，测试只能看到"没反应"。
+                if (s.Length > 0 && s[0] == '\uFEFF') s = s.Substring(1).Trim();
+                if (s.Length == 0) return -1;
+                int v;
+                if (!int.TryParse(s, out v)) return -1;
+                if (v < 0 || v > 6) return -1;
+                return v;
+            }
+            catch { return -1; }
+        }
+
         /// <summary>
         /// 读当前系统通知状态。失败时返回上一次的值（首次为 NotForcedOn）——
         /// **fail-open**：探测失败宁可照常提醒，也不能让用户悄悄失去所有提醒。
         /// </summary>
         public static QunsState Query()
         {
+            // 文件钩子必须排在缓存前面：它是"运行中改变状态"的唯一手段，
+            // 放缓存后面会让变更最多延迟 3 秒才生效。未设路径时这里只是一次长度判断。
+            int fv = ReadForcedFromFile();
+            if (fv >= 0) return (QunsState)fv;
+
             if (forced >= 0) return (QunsState)forced;
 
             try
@@ -1094,6 +1141,11 @@ namespace EyeLite
         // 竞品 憩目 Qimu 用的是 30 秒；这是 P0-B「30 秒预告 + 三出口」的参数。
         public int PreviewSeconds = 30;
 
+        // A2 渐进式降饱和：休息前 60 秒把屏幕整体压暗的**最大强度**（百分比）。
+        // 45 = 最暗时整窗 alpha 0.45；0 = 关闭该功能（一个 DimForm 都不创建）。
+        // 上限 70 是为了别把人真正压暗到看不清内容 —— 渐暗是"温和提示"，不是遮罩。
+        public int DimAlphaMax = 45;
+
         // 久坐/活动是**第二套时钟**，与护眼节奏独立：
         // 护眼（WorkMinutes/RestSeconds）管"看远处 20 秒"，久坐管"45 分钟起身 2 分钟"。
         public bool SedentaryEnabled = true;
@@ -1152,6 +1204,7 @@ namespace EyeLite
                         case "StrictMode": c.StrictMode = v == "1"; break;
                         case "StartWithWindows": c.StartWithWindows = v == "1"; break;
                         case "PreviewSeconds": c.PreviewSeconds = Clamp(v, 30, 0, 300); break;
+                        case "DimAlphaMax": c.DimAlphaMax = Clamp(v, 45, 0, 70); break;
                         case "SedentaryEnabled": c.SedentaryEnabled = v == "1"; break;
                         case "SedentaryMinutes": c.SedentaryMinutes = Clamp(v, 45, 15, 180); break;
                         case "SedentarySeconds": c.SedentarySeconds = Clamp(v, 120, 30, 300); break;
@@ -1193,6 +1246,7 @@ namespace EyeLite
                 sb.AppendLine("StrictMode=" + (StrictMode ? "1" : "0"));
                 sb.AppendLine("StartWithWindows=" + (StartWithWindows ? "1" : "0"));
                 sb.AppendLine("PreviewSeconds=" + PreviewSeconds);
+                sb.AppendLine("DimAlphaMax=" + DimAlphaMax);
                 sb.AppendLine("SedentaryEnabled=" + (SedentaryEnabled ? "1" : "0"));
                 sb.AppendLine("SedentaryMinutes=" + SedentaryMinutes);
                 sb.AppendLine("SedentarySeconds=" + SedentarySeconds);
@@ -2075,21 +2129,98 @@ namespace EyeLite
     }
 
     // ================================================================
+    // 5.5 渐进降饱和遮罩（A2：休息前 60 秒整体渐暗）
+    // ================================================================
+    //
+    // 为什么用整窗 Opacity 而不是"像素级变暗"：
+    //   像素级必须先把屏幕抓成位图，3840x2160x4 ≈ 33MB，且每次半透明合成还要再一份，
+    //   直接违反文件头第 5 条硬约束（绝不缓存全屏位图）。
+    //   整窗 Opacity 走 DWM 合成，进程内零额外内存。
+    //
+    // 三条安全要求（缺一条就会变成"打扰"而不是"提示"）：
+    //   · 永不成前台：WS_EX_NOACTIVATE，ShowWithoutActivation
+    //   · 不接收键鼠：WS_EX_TRANSPARENT，鼠标穿透到下面的程序
+    //   · 不进 Alt+Tab / 不占任务栏：WS_EX_TOOLWINDOW + ShowInTaskbar=false
+    // 另外任何键鼠输入都要由调用方立刻隐藏（见 TrayApp.DimTick）——
+    // 一个"变暗后还撤销不掉"的窗口对正在打字的人来说是无法接受的。
+    internal class DimForm : Form
+    {
+        public DimForm(Rectangle bounds)
+        {
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.StartPosition = FormStartPosition.Manual;
+            this.Bounds = bounds;
+            this.ShowInTaskbar = false;
+            this.TopMost = true;
+            this.BackColor = Color.Black;
+            this.AutoScaleMode = AutoScaleMode.None;
+            // 构造期就把 Opacity 压到 0：
+            //   · 让 CreateParams 带上 WS_EX_LAYERED（首帧不会闪一帧全黑）
+            //   · Opacity 只能在句柄创建后才有意义，所以调用方 Show() 之后会再设一次真实值
+            try { this.Opacity = 0.0; }
+            catch { }
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000;   // WS_EX_NOACTIVATE：不抢焦点
+                cp.ExStyle |= 0x00000080;   // WS_EX_TOOLWINDOW：不进 Alt+Tab、不占任务栏
+                cp.ExStyle |= 0x00000020;   // WS_EX_TRANSPARENT：鼠标穿透，不拦截任何点击
+                return cp;
+            }
+        }
+
+        /// <summary>
+        /// 安全地设强度：alpha 一律钳进 [0, 1]，并吞掉"句柄还没建好"这类异常。
+        /// 调用方（TrayApp / 设置页预览）都不希望一个 UI 细节打断主流程。
+        /// </summary>
+        public void SetAlpha(double alpha)
+        {
+            if (alpha < 0.0) alpha = 0.0;
+            if (alpha > 1.0) alpha = 1.0;
+            try
+            {
+                if (!this.IsHandleCreated) return;   // 没句柄就先不动，等 Show 之后再设
+                this.Opacity = alpha;
+            }
+            catch { }
+        }
+    }
+
+    // ================================================================
     // 6. 设置窗体（浅色卡片式）
     // ================================================================
     internal class SettingsForm : Form
     {
         private NumericUpDown numWork, numRest, numPomoWork, numPomoRest,
-                              numSedMinutes, numSedSeconds, numPostpone, numIdle, numPreview;
+                              numSedMinutes, numSedSeconds, numPostpone, numIdle, numPreview, numDim;
         private CheckBox chkPomodoro, chkSedentary, chkAllowSkip, chkSound, chkStrict, chkAutoStart,
                           chkSuppressFullscreen;
 
+        // ---- A2「预览渐暗」：3 秒淡入 + 1 秒保持 + 1 秒淡出，用完立刻 Dispose ----
+        // 只为这几秒创建 DimForm，绝不常驻；关掉对话框（Dispose）也会一起收干净。
+        private System.Windows.Forms.Timer dimPreviewTimer;
+        private List<DimForm> dimPreviewForms;
+        private int dimPreviewStep;
+        private float dimPreviewMax;            // 本次预览的目标 alpha（0~1）
+
         // 版式常量（以下全部是 96dpi 下的设计值，运行时一律经 Sc() 乘 DPI 因子）
-        // 设计基准客户区 520 x 952：
-        //   88(页头) + 144(节奏，3 行) + 16 + 144(番茄钟) + 16 + 144(久坐与活动) + 16
-        //   + 304(行为，8 行) + 24 + 38(按钮) + 18(底部留白) = 952
+        // 设计基准客户区 520 x 1018：
+        //   88(页头) + 210(节奏，4 行 + 预览按钮) + 16 + 144(番茄钟) + 16 + 144(久坐与活动) + 16
+        //   + 304(行为，8 行) + 24 + 38(按钮) + 18(底部留白) = 1018
+        //
+        // 这个数字只是"内容的自然高度"，不是硬指标：窗口放不下时由 AutoScroll 兜住，
+        // 所以再加行只要同步改这里 + 末尾的 AutoScrollMinSize，不会出现"按钮被切掉"。
         private const int FormW = 520;
-        private const int FormH = 952;
+        private const int FormH = 1018;
         private const int CardLeft = 24;
         private const int CardWidth = 472;      // 520 - 24 * 2
         private const int CardPad = 22;         // 卡片左右内边距
@@ -2139,16 +2270,16 @@ namespace EyeLite
             }
             catch { maxH = clientH; }
 
-            if (clientH > maxH)
-            {
-                this.AutoScroll = true;
-                // 宽度传 0：让水平范围跟随客户区宽度。
-                // 若把宽度也设成 clientW，垂直滚动条吃掉约 17px 后内容反而"超宽"，会多出一条横向滚动条。
-                this.AutoScrollMinSize = new Size(0, clientH);
-                clientH = maxH;
-            }
+            if (clientH > maxH) clientH = maxH;
 
             this.ClientSize = new Size(clientW, clientH);
+
+            // AutoScroll 常开（不再只在"窗口被钳高"时才开）。
+            // 卡片还会继续长（A2 的「渐暗强度」行 + 「预览渐暗」按钮就是这么加上来的），
+            // 靠滚动兜住内容，而不是靠调大 FormH 硬撑 —— 硬撑的下一步一定是溢出。
+            // 放得下时 AutoScrollMinSize 小于客户区，滚动条根本不出现，完全无感；
+            // 真正的滚动范围在构造函数末尾按 btnY 算出来再设（那时才知道内容多高）。
+            this.AutoScroll = true;
 
             // ---------- 页头：直接画在窗体上 ----------
             // 不再用固定高度的 Panel 装标题：Panel 会裁掉超出边界的子控件。
@@ -2198,15 +2329,29 @@ namespace EyeLite
             lblVersion.SetBounds(Sc(8), 0, chipW - Sc(16), chipH);
             chipVersion.Controls.Add(lblVersion);
 
-            // ---------- 卡片 1：节奏（3 行）----------
+            // ---------- 卡片 1：节奏（4 行 + 预览按钮）----------
+            // 卡片高度：FirstRowTop(38) + 4 行 * 32 + 按钮行 30 + 底部留白 ≈ 210
             int y = Sc(88);
-            RoundPanel card1 = AddCard(y, Sc(144), "节奏");
+            RoundPanel card1 = AddCard(y, Sc(210), "节奏");
             numWork = AddRow(card1, Sc(FirstRowTop), "工作时长（分钟）", 1, 240, cfg.WorkMinutes);
             numRest = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight), "休息时长（秒）", 5, 1800, cfg.RestSeconds);
             // 预告窗口（P0-B）：0 = 不预告，直接到点全屏遮罩。
             // 放在「节奏」卡而不是「行为」卡，因为它改的是提醒**时机**而不是行为约束。
             numPreview = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight) * 2, "提前预告（秒，0=不预告）", 0, 300, cfg.PreviewSeconds);
-            y += Sc(144) + Sc(Gap);
+            // A2 渐进降饱和：0 = 关闭（一个窗口都不创建），上限 70 见 AppConfig.DimAlphaMax 的注释。
+            numDim = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight) * 3, "休息前渐暗强度（%，0=关闭）", 0, 70, cfg.DimAlphaMax);
+
+            // 现场感受强度：3 秒淡入 → 保持 1 秒 → 1 秒淡出。
+            // 光看"45%"这个数字没人能判断合不合适，必须让人当场看一遍。
+            RoundButton btnDimPreview = new RoundButton("预览渐暗", Sc(8),
+                                                       Ui.CardBg, Ui.SecondaryHover,
+                                                       Ui.LabelText, Ui.SecondaryBorder, Math.Max(1, Sc(1)));
+            btnDimPreview.Font = Ui.FontRowLabel;
+            btnDimPreview.SetBounds(Sc(CardPad), Sc(FirstRowTop) + Sc(RowHeight) * 4, Sc(120), Sc(30));
+            btnDimPreview.Click += delegate { StartDimPreview(); };
+            card1.Controls.Add(btnDimPreview);
+
+            y += Sc(210) + Sc(Gap);
 
             // ---------- 卡片 2：番茄钟（3 行）----------
             RoundPanel card2 = AddCard(y, Sc(144), "番茄钟");
@@ -2271,6 +2416,131 @@ namespace EyeLite
 
             this.AcceptButton = ok;
             this.CancelButton = cancel;
+
+            // 真正的滚动范围在这里才定得下来：内容总高 = 保存按钮底边 + 底部留白。
+            // 宽度传 0 = 水平范围跟随客户区（见构造函数开头 AutoScroll 处的原因）。
+            this.AutoScrollMinSize = new Size(0, btnY + Sc(38) + Sc(18));
+        }
+
+        // ================================================================
+        // A2「预览渐暗」：让用户当场看一遍强度，而不是对着一个百分数猜
+        // ================================================================
+        //
+        // 节奏：3 秒淡入 → 保持 1 秒 → 1 秒淡出（50ms 一档）。
+        // 只用整窗 Opacity，不做像素级处理；每块屏幕一个 DimForm，用完立刻 Dispose。
+
+        private const int DimPreviewInterval = 50;      // 定时器间隔（毫秒）
+        private const int DimPreviewFadeInSteps = 60;   // 3 秒淡入
+        private const int DimPreviewHoldSteps = 20;     // 1 秒保持
+        private const int DimPreviewFadeOutSteps = 20;  // 1 秒淡出
+
+        private void StartDimPreview()
+        {
+            StopDimPreview();
+
+            // 0 = 关闭该功能：不弹任何窗口（与运行时行为一致，不给用户"其实生效了"的错觉）
+            int pct = (int)numDim.Value;
+            if (pct <= 0) return;
+
+            dimPreviewMax = (float)(pct / 100.0);
+
+            EnsureDimPreviewForms();
+            if (dimPreviewForms == null || dimPreviewForms.Count == 0) return;
+
+            dimPreviewStep = 0;
+            dimPreviewTimer = new System.Windows.Forms.Timer();
+            dimPreviewTimer.Interval = DimPreviewInterval;
+            dimPreviewTimer.Tick += delegate { DimPreviewTick(); };
+            dimPreviewTimer.Start();
+        }
+
+        /// <summary>每块屏幕一个渐暗窗口；只在预览期间存在，结束即 Dispose。</summary>
+        private void EnsureDimPreviewForms()
+        {
+            if (dimPreviewForms != null) return;
+
+            dimPreviewForms = new List<DimForm>();
+            try
+            {
+                Screen[] screens = Screen.AllScreens;
+                for (int i = 0; i < screens.Length; i++)
+                {
+                    DimForm f = new DimForm(screens[i].Bounds);
+                    f.Show();
+                    f.SetAlpha(0.0);      // Show 之后句柄一定在，这里把 0 值真正写进去
+                    dimPreviewForms.Add(f);
+                }
+            }
+            catch { }
+        }
+
+        private void DimPreviewTick()
+        {
+            dimPreviewStep++;
+
+            double alpha;
+            if (dimPreviewStep <= DimPreviewFadeInSteps)
+            {
+                alpha = dimPreviewMax * dimPreviewStep / DimPreviewFadeInSteps;
+            }
+            else if (dimPreviewStep <= DimPreviewFadeInSteps + DimPreviewHoldSteps)
+            {
+                alpha = dimPreviewMax;
+            }
+            else if (dimPreviewStep <= DimPreviewFadeInSteps + DimPreviewHoldSteps + DimPreviewFadeOutSteps)
+            {
+                int left = DimPreviewFadeInSteps + DimPreviewHoldSteps + DimPreviewFadeOutSteps - dimPreviewStep;
+                alpha = dimPreviewMax * left / DimPreviewFadeOutSteps;
+            }
+            else
+            {
+                StopDimPreview();
+                return;
+            }
+
+            if (dimPreviewForms == null) return;
+            for (int i = 0; i < dimPreviewForms.Count; i++)
+            {
+                DimForm f = dimPreviewForms[i];
+                if (f == null || f.IsDisposed) continue;
+                f.SetAlpha(alpha);
+            }
+        }
+
+        /// <summary>停掉预览并把窗口收干净（重复调用安全）。</summary>
+        private void StopDimPreview()
+        {
+            if (dimPreviewTimer != null)
+            {
+                try { dimPreviewTimer.Stop(); } catch { }
+                try { dimPreviewTimer.Dispose(); } catch { }
+                dimPreviewTimer = null;
+            }
+
+            if (dimPreviewForms != null)
+            {
+                for (int i = 0; i < dimPreviewForms.Count; i++)
+                {
+                    DimForm f = dimPreviewForms[i];
+                    if (f == null) continue;
+                    try { f.SetAlpha(0.0); } catch { }
+                    try { f.Hide(); } catch { }
+                    try { f.Close(); } catch { }
+                    try { f.Dispose(); } catch { }
+                }
+                dimPreviewForms.Clear();
+                dimPreviewForms = null;
+            }
+
+            dimPreviewStep = 0;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            // 对话框被直接关掉（Esc / 取消）时，预览窗口也必须一起收掉 ——
+            // 否则屏幕会一直暗着，而且没人能再把它关掉。
+            if (disposing) StopDimPreview();
+            base.Dispose(disposing);
         }
 
         /// <summary>
@@ -2381,6 +2651,7 @@ namespace EyeLite
             cfg.PostponeMinutes = (int)numPostpone.Value;
             cfg.IdleMinutes = (int)numIdle.Value;
             cfg.PreviewSeconds = (int)numPreview.Value;
+            cfg.DimAlphaMax = (int)numDim.Value;
             cfg.SuppressOnFullscreen = chkSuppressFullscreen.Checked;
             cfg.SoundEnabled = chkSound.Checked;
             cfg.StrictMode = chkStrict.Checked;
@@ -2457,12 +2728,110 @@ namespace EyeLite
         private bool isSuppressed = false;      // 当前是否被全屏/演示抑制
         private long suppressedSinceMs = 0;     // 本次抑制开始时刻
         private long suppressNoticeAtMs = 0;    // 下次弹「已暂缓」横幅的时刻
+        private bool suppressForced = false;    // 本轮连续抑制中是否已强制放行过
         private QunsState currentQuns = QunsState.NotForcedOn;
 
         private List<RestForm> restForms = new List<RestForm>();
+        private bool restFormsWarmed = false;   // 是否已在第一个 tick 预热过遮罩窗体
         private string screenSignature = "";
         private Icon iconIdle;
         private Icon iconRest;
+
+        // ---- A3：托盘图标进度环 ----
+        //
+        // 只在"剩余整分钟数"变化时重绘：每秒换一个 HICON 会让 GDI 句柄涨得比
+        // 任何其他路径都快（NotifyIcon 每次换图都要惊动 shell）。
+        private int lastIconMinute = -1;
+
+        // 当前这一帧的进度环 Icon。它由 MakeProgressIcon 内部 Clone 出来，
+        // **自己拥有 HICON**，所以换新图时必须 Dispose 旧的（否则就是纯泄漏）。
+        private Icon lastProgressIcon = null;
+
+        // ---- A2：渐进式降饱和（休息前 60 秒整体渐暗）----
+        //
+        // 延迟创建：DimAlphaMax == 0（功能关闭）时**一个 DimForm 都不建**。
+        private List<DimForm> dimForms;
+        private bool dimGaveUp = false;         // 本轮已因键鼠输入放弃，不再出现
+        private int dimLastStep = -1;           // 上次应用的档位（-1 = 本轮还没应用过）
+        private double dimLastAlpha = -1.0;     // 上次真正写进 Opacity 的值（-1 = 尚未应用）
+        private long dimLastIdleMs = -1;        // 上次采样到的 idle 毫秒（用于发现"有新输入"）
+
+        // ---- 测试钩子：抑制上限 ----
+        //
+        // 环境变量 EYE_LITE_SUPPRESS_MAX_MS 可改写"抑制最多持续多久"，
+        // 默认 30 分钟。只在类型初始化时读一次，不读时零影响（与 EYE_LITE_FORCE_QUNS 同一风格）。
+        private static readonly long MaxSuppressMs = ReadMaxSuppressMs();
+
+        private static long ReadMaxSuppressMs()
+        {
+            const long Default = 30L * 60L * 1000L;
+            try
+            {
+                string s = Environment.GetEnvironmentVariable("EYE_LITE_SUPPRESS_MAX_MS");
+                if (string.IsNullOrEmpty(s)) return Default;
+                long v;
+                if (!long.TryParse(s, out v)) return Default;
+                if (v <= 0) return Default;
+                return v;
+            }
+            catch { return Default; }
+        }
+
+        // ---- 测试钩子：伪造空闲时长 ----
+        //
+        // 环境变量 EYE_LITE_FAKE_IDLE_MS 设成非负整数后，空闲检测直接返回该值，
+        // 让自动化测试能确定性地模拟"用户已离开 N 毫秒"。未设置时走 GetLastInputInfo。
+        //
+        // 另有一个**运行期可改**的版本 EYE_LITE_FAKE_IDLE_FILE（指向一个文本文件）：
+        // 每次取空闲时长都重读文件，用来验证 P0-D-2「离开超过整个休息时长 → 重置周期」
+        // 这条 —— 它必须做到"先让空闲很大（触发重置）、再把空闲清零（模拟人回来了）"，
+        // 而环境变量在进程启动后就改不了了（Win32 不允许改别的进程的环境变量）。
+        private static readonly long FakeIdleMs = ReadFakeIdleMs();
+        private static readonly string FakeIdleFile = ReadFakeIdleFile();
+
+        private static long ReadFakeIdleMs()
+        {
+            try
+            {
+                string s = Environment.GetEnvironmentVariable("EYE_LITE_FAKE_IDLE_MS");
+                if (string.IsNullOrEmpty(s)) return -1;
+                long v;
+                if (!long.TryParse(s, out v)) return -1;
+                if (v < 0) return -1;
+                return v;
+            }
+            catch { return -1; }
+        }
+
+        private static string ReadFakeIdleFile()
+        {
+            try
+            {
+                string s = Environment.GetEnvironmentVariable("EYE_LITE_FAKE_IDLE_FILE");
+                if (string.IsNullOrEmpty(s)) return "";
+                return s;
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>读文件钩子当前的空闲毫秒；没设路径 / 文件不在 / 内容非法一律返回 -1（= 不生效）。</summary>
+        private static long ReadFakeIdleFromFile()
+        {
+            if (FakeIdleFile.Length == 0) return -1;
+            try
+            {
+                if (!File.Exists(FakeIdleFile)) return -1;
+                string s = File.ReadAllText(FakeIdleFile, Encoding.UTF8).Trim();
+                // 脚本写文件可能留 UTF-8 BOM，而 Trim 不把 U+FEFF 当空白。
+                if (s.Length > 0 && s[0] == '\uFEFF') s = s.Substring(1).Trim();
+                if (s.Length == 0) return -1;
+                long v;
+                if (!long.TryParse(s, out v)) return -1;
+                if (v < 0) return -1;
+                return v;
+            }
+            catch { return -1; }
+        }
 
         public TrayApp()
         {
@@ -2563,8 +2932,21 @@ namespace EyeLite
             workLimitMs = (long)WorkTotalSeconds * 1000L;
             sedLimitMs = cfg.SedentaryEnabled ? (long)cfg.SedentaryMinutes * 60L * 1000L : 0;
             lastAnchorMs = Clock.NowMs();
+            ResetDimRound();       // 新一轮计时：渐暗重新可以出现（上一轮放弃过也不影响这轮）
             RefreshRemaining();
             UpdateTrayText();
+        }
+
+        /// <summary>
+        /// 把 A2 渐暗的状态位归零（新一轮计时开始）。
+        /// 只归零状态，不建窗口 —— 窗口仍然是"第一次真的要暗时才建"。
+        /// </summary>
+        private void ResetDimRound()
+        {
+            dimGaveUp = false;
+            dimLastStep = -1;
+            dimLastIdleMs = -1;
+            HideDim();
         }
 
         /// <summary>
@@ -2577,6 +2959,10 @@ namespace EyeLite
                 ? SecondsLeft(sedLimitMs - sedAccumMs)
                 : 0;
             if (isResting) restRemaining = SecondsLeft(restDueMs - Clock.NowMs());
+
+            // 所有会改变剩余时间的路径都会走到这里（首轮 / 每小时 tick / 推迟 / 跳过），
+            // 所以进度环只挂在这一个点上，不用在每个分支各写一遍。
+            UpdateTrayProgressIcon();
         }
 
         /// <summary>剩余毫秒转剩余秒（向上取整：还有 1.2 秒时显示 2 秒，用户看到 0 秒就该弹了）。</summary>
@@ -2719,21 +3105,79 @@ namespace EyeLite
                             isSuppressed = true;
                             suppressedSinceMs = now;
                             suppressNoticeAtMs = now;
+                            suppressForced = false;
                             if (isPreviewing) EndPreview();
                         }
-                        HandleSuppressedTick(now, sedDue || workDue);
-                        RefreshRemaining();
-                        UpdateTrayText();
-                        return;
+
+                        // A2 渐暗层必须在这里撤：下面马上就要 return，
+                        // 而渐暗是在正常流程里求值的 —— 不撤就会一直挂在屏幕上，
+                        // 压在别人的全屏内容上面（本来"全屏不打扰"就是这个 gate 的意义）。
+                        HideDim();
+
+                        // 未到上限、且本轮还没强制放行过 → 继续压住。
+                        // 注意这里的 return：抑制期间的"不提醒"是靠它实现的。
+                        if (!suppressForced && (now - suppressedSinceMs) < MaxSuppressMs)
+                        {
+                            HandleSuppressedTick(now, sedDue || workDue);
+                            RefreshRemaining();
+                            UpdateTrayText();
+                            return;
+                        }
+
+                        // 首次到达上限 → 放行一次（写进日志式的气泡，让用户知道为什么突然弹了）。
+                        if (!suppressForced)
+                        {
+                            suppressForced = true;
+                            try
+                            {
+                                tray.ShowBalloonTip(4000, "护眼小助手",
+                                    "全屏 / 演示状态持续过久，已停止暂缓提醒。", ToolTipIcon.Info);
+                            }
+                            catch { }
+                        }
+
+                        // 关键：**不要 return**，也**不要**把 isSuppressed 置 false。
+                        // 置 false 会让下一个 tick 的 "if (!isSuppressed)" 又成立，
+                        // 于是重新开始计时、再压 30 分钟 —— 那正是"只弹气泡、遮罩永不出现"的旧 bug。
+                        // 落到下面的正常流程，到点就直接 BeginRest（契约 §9 的分支顺序仍然成立：
+                        // 休息一旦开始就走 isResting 分支，gate 不再求值）。
                     }
 
-                    if (isSuppressed)
+                    if (isSuppressed && !blocked)
                     {
-                        // 抑制解除：不需要任何"补弹"，因为累加器一直在走，
+                        // 抑制真正解除（QUNS 回到非抑制值）：
+                        // 不需要任何"补弹"，因为累加器一直在走，
                         // 下面正常的到点判定会立刻决定要不要弹。
+                        // suppressForced 一并复位 —— 下一轮连续抑制重新给足 30 分钟。
                         isSuppressed = false;
                         suppressedSinceMs = 0;
+                        suppressForced = false;
                     }
+
+                    // ---- 预热遮罩窗体 ----
+                //
+                // EnsureRestForms() 原本只在 BeginRest 里调用 —— 也就是**该弹遮罩的那一刻**
+                // 才开始建全屏窗体（实测一次性分配 26 个 GDI 对象 + 字体/布局构造）。
+                // 代价直接落在这个功能的"准时性"上：实测到点时刻出现过 63.53s / 64.48s
+                // （期望 60s ± 3s），而前两轮只要构造快一点就是 60.6s。
+                //
+                // 这里在第一个 tick 就建好，之后 BeginRest 里那次调用会因为
+                // "签名未变且 restForms.Count > 0" 直接返回，不再产生任何分配。
+                // 代价是启动基线 GDI 从 21 涨到 47（这是一次性分配，不是泄漏：
+                // 实测 185s 内稳定在 47，不再增长）。
+                if (!restFormsWarmed)
+                {
+                    restFormsWarmed = true;
+                    try { EnsureRestForms(); } catch { }
+                }
+
+                // ---- A2：休息前 60 秒的渐进降饱和（每 tick 一次）----
+                    // 求值点必须**在 gate 之后**：放在 tick 顶部的话，用户在上一次 tick
+                    // 与本次 tick 之间切进全屏/演示，这一步会先把屏幕压暗，
+                    // 下一个 tick 才被 gate 撤掉 —— 表现为"切全屏时闪一下变暗"。
+                    // 放在这里时 blocked 已经算完：被压住的路径都 return 或 HideDim 过。
+                    // DimTick 内部仍保留 resting / previewing / suppressed / paused 的判据做兜底。
+                    try { DimTick(); } catch { }
 
                     // ---- 预告窗口（P0-B）----
                     // 到点前 PreviewSeconds 秒，横幅出现给三出口。
@@ -2812,8 +3256,12 @@ namespace EyeLite
                     }
                 }
                 catch { }
+                try { HideDim(); } catch { }   // A2：自愈时也必须把渐暗层撤掉，否则它会一直盖在屏幕上
                 try { tray.Icon = iconIdle; } catch { }
                 try { ResetWork(); } catch { }
+                // 图标已换成静态眼睛，把"上次绘制的整分钟"也清掉，
+                // 否则下一个 tick 若剩余分钟数没变就不会重画进度环，托盘会一直停在眼睛上。
+                lastIconMinute = -1;
             }
         }
 
@@ -2826,26 +3274,14 @@ namespace EyeLite
         ///   3. **不让用户以为程序坏了**：最多每 5 分钟给一条托盘气泡，
         ///      说明"因全屏/演示暂缓"，并告知到点已过。
         ///      气泡是 NotifyIcon.ShowBalloonTip —— 不抢焦点、不抢输入。
+        ///
+        /// 注意：**"到上限强制放行"不在这里**。它必须由调用方（OnTick 的 blocked 分支）
+        /// 判断，因为放行的语义是"本 tick 不 return、落到正常到点判定"，
+        /// 在方法内部 return 是什么都做不到的 —— 那正是旧 bug 的成因。
+        /// 本方法只剩下"每 5 分钟一条告知气泡"这一件事。
         /// </summary>
         private void HandleSuppressedTick(long now, bool dueNow)
         {
-            // 抑制期最长 30 分钟：超过就强制放行一次。
-            // 理由：全屏状态可能一直查不到（例如某些独占全屏程序不更新通知状态），
-            // 没有这个上限 EyeLite 会变成"永远不提醒"，那比误打扰更糟。
-            const long maxSuppressMs = 30L * 60L * 1000L;
-            if (now - suppressedSinceMs >= maxSuppressMs)
-            {
-                isSuppressed = false;
-                suppressedSinceMs = 0;
-                try
-                {
-                    tray.ShowBalloonTip(4000, "护眼小助手",
-                        "全屏 / 演示状态持续过久，已强制提醒一次。", ToolTipIcon.Info);
-                }
-                catch { }
-                return;
-            }
-
             // 到点了但被压住 → 给用户一条明确告知（最多每 5 分钟一条）
             if (dueNow && now - suppressNoticeAtMs >= 5L * 60L * 1000L)
             {
@@ -2913,6 +3349,10 @@ namespace EyeLite
 
                 isPreviewing = true;
                 previewIsBody = bodyBreak;
+
+                // A2：进预告就把渐暗层撤掉。横幅本身就是"要休息了"的强信号，
+                // 再叠一层变暗既看不清横幅，也像是出了故障。
+                HideDim();
 
                 // 先把倒计时算出来再 SetCountdown：StartPreview 里不能拿上一轮的
                 // previewRemaining 显示，否则横幅第一帧会闪一个旧值。
@@ -3004,6 +3444,7 @@ namespace EyeLite
                 sedLimitMs = Math.Max(sedLimitMs, (long)cfg.SedentaryMinutes * 60L * 1000L);
                 sedLimitMs += (long)cfg.PostponeMinutes * 60L * 1000L;
             }
+            ResetDimRound();     // 延后 = 本轮重新开始计时，渐暗可以再出现一次
             RefreshRemaining();
             UpdateTrayText();
         }
@@ -3020,6 +3461,10 @@ namespace EyeLite
             // （正常路径上预告到点已经在 OnTick 里 EndPreview 过，这里是兜底。）
             EndPreview();
 
+            // A2：渐暗层必须立刻撤掉 —— 它和遮罩叠在一起会让遮罩显得"发灰"，
+            // 而且遮罩本来就是主角，渐暗只是到点前的铺垫。
+            HideDim();
+
             // 记下当时的前台窗口，休息结束时若前台被我们占了就还回去。
             // 遮罩是 WS_EX_NOACTIVATE，理论上不会抢，这是点击按钮等情况下的保险。
             try { savedForeground = GetForegroundWindow(); }
@@ -3030,6 +3475,7 @@ namespace EyeLite
             // 抑制状态在这里清掉，休息期间不再评估 gate（契约 §9）。
             isSuppressed = false;
             suppressedSinceMs = 0;
+            suppressForced = false;   // 强制放行标记随抑制态一起归零，不留给下一轮
             restTotalSeconds = bodyBreak ? cfg.SedentarySeconds : RestTotalSeconds;
             restDueMs = Clock.NowMs() + (long)restTotalSeconds * 1000L;
             restRemaining = restTotalSeconds;
@@ -3132,6 +3578,10 @@ namespace EyeLite
             }
 
             try { tray.Icon = iconIdle; } catch { }
+            // A3：收遮罩后立刻把图标切回进度环。只塞 iconIdle 的话，托盘会一直停在
+            // 静态眼睛上，直到"剩余整分钟数"下次变化才被重画覆盖（最多能停 1 分钟）。
+            lastIconMinute = -1;
+            try { RefreshRemaining(); } catch { }
             try { if (cfg.SoundEnabled) Sfx.PlayEnd(); } catch { }
             try { UpdateTrayText(); } catch { }
 
@@ -3228,10 +3678,12 @@ namespace EyeLite
                 if (paused) s = "已暂停 · 右键可恢复";
                 else if (isResting) s = "休息中 " + restRemaining + " 秒";
                 else if (isPreviewing) s = "即将休息 " + previewRemaining + " 秒";
-                else if (isSuppressed)
+                else if (isSuppressed && !suppressForced)
                 {
                     // 抑制期间必须说清楚"为什么没提醒"，否则用户以为程序坏了。
                     // 文案区分全屏与演示（NotifyIcon.Text 上限 63 字符，务必短）。
+                    // suppressForced 为真时抑制已经放行（只是 QUNS 还没回到非抑制值），
+                    // 此时再说"暂缓"就是撒谎 —— 让它落到下面的正常剩余时间文案。
                     string reason = NotificationState.ReasonText(currentQuns);
                     s = reason.Length > 0 ? reason : "提醒暂缓中";
                 }
@@ -3284,13 +3736,34 @@ namespace EyeLite
         // 第二个需求必须有实际秒数才能判断，只返回布尔就做不到。
         private int IdleSeconds()
         {
+            return (int)(RawIdleMs() / 1000);
+        }
+
+        /// <summary>
+        /// 距上次键鼠输入的毫秒数。
+        ///
+        /// 测试钩子：环境变量 EYE_LITE_FAKE_IDLE_MS 存在且能解析成非负整数时**直接返回该值**，
+        /// 让自动化测试可以确定性地模拟"用户已离开 N 毫秒"，不必真的去动键鼠。
+        /// 未设置时走 GetLastInputInfo（失败返回 0 = 当成"人就在" —— fail-open，
+        /// 宁可多提醒一次，也不能因为探测失败让计时永远停着）。
+        ///
+        /// A2 渐暗判断"有没有新输入"也走这里，口径与空闲计时完全一致。
+        /// </summary>
+        private static long RawIdleMs()
+        {
+            // 文件钩子优先：它能在进程运行中改变，用来验证"离开后又回来"这类时序。
+            long fromFile = ReadFakeIdleFromFile();
+            if (fromFile >= 0) return fromFile;
+
+            if (FakeIdleMs >= 0) return FakeIdleMs;
+
             try
             {
                 LASTINPUTINFO lii = new LASTINPUTINFO();
                 lii.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
                 if (!GetLastInputInfo(ref lii)) return 0;
                 uint idleMs = unchecked((uint)Environment.TickCount) - lii.dwTime;
-                return (int)(idleMs / 1000);
+                return (long)idleMs;
             }
             catch { return 0; }
         }
@@ -3360,6 +3833,314 @@ namespace EyeLite
             return Icon.FromHandle(bmp.GetHicon());
         }
 
+        /// <summary>
+        /// A3：托盘图标进度环。底盘是暗灰整圈，进度从 12 点方向顺时针扫过
+        /// progress * 360 度，颜色由调用方按剩余比例给（蓝 / 黄 / 橙）。
+        ///
+        /// 中心**保持透明**：任务栏底色有深有浅，填了色块反而更糊；
+        /// 环本身在小尺寸下辨识度已经够了。
+        ///
+        /// GDI 句柄纪律：Icon.FromHandle 不拥有句柄，每次重绘前必须 DestroyIcon 上一帧，
+        /// 否则句柄会随分钟数一路涨上去（任务栏图标不像普通控件，泄漏是永久的）。
+        /// </summary>
+        private static Icon MakeProgressIcon(float progress, Color fill)
+        {
+            if (progress < 0f) progress = 0f;
+            if (progress > 1f) progress = 1f;
+
+            Bitmap bmp = new Bitmap(32, 32);
+            try
+            {
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.Clear(Color.Transparent);
+
+                    // 3px 笔宽画在 28x28 的内接矩形上：描边实际占 0.5~31.5px，正好不切边
+                    Rectangle ringRect = new Rectangle(2, 2, 28, 28);
+                    using (Pen track = new Pen(Color.FromArgb(70, 70, 70), 3f))
+                    {
+                        g.DrawArc(track, ringRect, 0f, 360f);
+                    }
+                    if (progress > 0.002f)      // 剩余比例极小时不画，避免 DrawArc 出毛刺
+                    {
+                        using (Pen p = new Pen(fill, 3f))
+                        {
+                            g.DrawArc(p, ringRect, -90f, progress * 360f);
+                        }
+                    }
+                }
+
+                // 用 Clone 拿一个"自己拥有句柄"的 Icon 再返回。
+                //
+                // 为什么不能直接 `return Icon.FromHandle(h)`：
+                //   FromHandle 返回的 Icon **不拥有** 那个 HICON，Dispose 也不会释放它；
+                //   而 NotifyIcon 每次赋值都会向 shell 重新注册图标。
+                //   原写法靠 lastIconHandle 手动 DestroyIcon 记账，实测 180s 泄漏
+                //   +22 个 GDI 对象（38 → 60）。改成"Clone 一份 + 立刻销毁临时句柄"，
+                //   句柄所有权交给返回的 Icon 自己，调用方 Dispose 即可回收。
+                IntPtr h = bmp.GetHicon();
+                try
+                {
+                    using (Icon tmp = Icon.FromHandle(h))
+                    {
+                        return (Icon)tmp.Clone();
+                    }
+                }
+                finally
+                {
+                    DestroyIcon(h);
+                }
+            }
+            finally
+            {
+                // GetHicon 返回的是位图的一份独立副本，拿完句柄就能放掉位图：
+                // 不这么做，每分钟一次重绘就是一分钟一张 32x32 位图的泄漏。
+                bmp.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// 选出"最紧迫的那条时钟"的剩余毫秒与总时长。
+        /// 护眼与久坐是两套独立时钟，同时在跑时按**剩余比例**取更小的那条 ——
+        /// 按绝对毫秒比会把 45 分钟的久坐永远判成"更远"，等于只看护眼。
+        /// 没有可用的时钟时返回 false。
+        /// </summary>
+        private bool PickMostUrgentClock(out long leftMs, out long totalMs)
+        {
+            leftMs = 0;
+            totalMs = 0;
+
+            bool hasWork = workLimitMs > 0;
+            bool hasSed = cfg.SedentaryEnabled && sedLimitMs > 0;
+            if (!hasWork && !hasSed) return false;
+
+            long workLeft = hasWork ? workLimitMs - workAccumMs : 0;
+            long sedLeft = hasSed ? sedLimitMs - sedAccumMs : 0;
+
+            bool useSed;
+            if (hasWork && hasSed)
+            {
+                double wr = (double)workLeft / (double)workLimitMs;
+                double sr = (double)sedLeft / (double)sedLimitMs;
+                useSed = sr < wr;
+            }
+            else
+            {
+                useSed = hasSed;
+            }
+
+            if (useSed) { leftMs = sedLeft; totalMs = sedLimitMs; }
+            else { leftMs = workLeft; totalMs = workLimitMs; }
+            return totalMs > 0;
+        }
+
+        /// <summary>
+        /// A3：按剩余比例换色重绘托盘图标。
+        ///
+        /// 重绘时机被"剩余整分钟数"卡住：只有 m 变化才画。
+        /// 每秒重绘会让 GDI 句柄与 shell 通知都变成每秒一次，对常驻程序是纯浪费 ——
+        /// 进度环的粒度本来就是分钟级，1 分钟一格肉眼看不出跳。
+        /// </summary>
+        private void UpdateTrayProgressIcon()
+        {
+            // 休息期间保持 iconRest（见 BeginRest），不画进度环
+            if (isResting) return;
+
+            long left, total;
+            if (!PickMostUrgentClock(out left, out total)) return;
+            if (left < 0) left = 0;
+            if (left > total) left = total;
+
+            int m = (int)(left / 60000L);
+            if (m == lastIconMinute) return;
+            lastIconMinute = m;
+
+            float progress = (float)((double)left / (double)total);
+
+            Color fill;
+            if (progress > 0.5f) fill = Color.FromArgb(64, 132, 220);            // 蓝：还宽裕
+            else if (progress > 0.2f) fill = Color.FromArgb(224, 178, 60);       // 黄：过半了
+            else fill = Color.FromArgb(232, 122, 48);                            // 橙：快到了
+
+            Icon prev = lastProgressIcon;
+            try
+            {
+                Icon ic = MakeProgressIcon(progress, fill);
+                lastProgressIcon = ic;
+                tray.Icon = ic;      // NotifyIcon 会给 shell 一份副本，之后释放本对象是安全的
+            }
+            catch { }
+            finally
+            {
+                // 旧帧必须在这里释放：Clone 出来的 Icon 拥有自己的 HICON，
+                // 不 Dispose 就是每分钟一个、永不回收的 GDI 泄漏。
+                if (prev != null)
+                {
+                    try { prev.Dispose(); } catch { }
+                }
+            }
+        }
+
+        // ---------- A2：渐进式降饱和 ----------
+        //
+        // 语义：离休息不到 60 秒开始，把屏幕整体（每块屏一层）从 0 线性压到
+        // cfg.DimAlphaMax/100，500ms 一档；任何键鼠输入立刻撤销并放弃本轮。
+        //
+        // 为什么"输入就放弃本轮"而不是"输入就延后"：
+        //   人正在打字时屏幕突然变暗是干扰；而一旦被打断就重新计时的做法，
+        //   会在"边打字边等下一条消息"的人身上反复闪，比不暗更烦。
+        //   所以：一次放弃 = 本轮安静到底，下一轮重新开始。
+
+        /// <summary>
+        /// 每 tick 调一次。所有"不该暗"的情况都收敛到 HideDim()，只有同时满足
+        /// 剩余 0~60 秒 / 非休息 / 非预告 / 非抑制 / 非暂停 / 未放弃 / 强度 > 0 时才真的显示。
+        /// </summary>
+        private void DimTick()
+        {
+            if (cfg.DimAlphaMax <= 0 || dimGaveUp)
+            {
+                HideDim();
+                return;
+            }
+
+            if (isResting || isPreviewing || isSuppressed || paused)
+            {
+                HideDim();
+                dimLastStep = -1;
+                return;
+            }
+
+            long left, total;
+            if (!PickMostUrgentClock(out left, out total) || left <= 0 || left > 60000)
+            {
+                // 还没进 60 秒窗口（或已经到点）：撤掉并把档位清掉，
+                // 下一轮进窗口时从最浅的一档重新淡入。
+                HideDim();
+                dimLastStep = -1;
+                return;
+            }
+
+            // 人走开了就别再压暗 —— 屏幕上没人看，留着暗层只会在回来时吓一跳。
+            if (IsIdleTooLong())
+            {
+                HideDim();
+                dimLastStep = -1;
+                return;
+            }
+
+            // ---- 键鼠输入 -> 撤销本轮 ----
+            // idle 毫秒在无人操作时单调递增，一旦比上次采样小，就说明这段时间里有输入。
+            // 用"变小"而不是"小于阈值"：阈值会把"一直在动"判成没动，也得照顾 tick 迟到。
+            long idleMs = RawIdleMs();
+            if (dimLastIdleMs >= 0 && idleMs < dimLastIdleMs)
+            {
+                HideDim();
+                dimGaveUp = true;
+                dimLastStep = -1;
+                return;
+            }
+            dimLastIdleMs = idleMs;
+
+            // 两次 Opacity 写入之间的最小间隔。
+            //
+            // 为什么从 500ms 放宽到 1000ms、并且再加一道"变化小于 1% 就不写"：
+            //   Opacity 每写一次，DWM 就要把**整块屏幕**重新合成一次。
+            //   双屏 2560x1440 下每秒 2 次写入，实测把 tick 拖到过 63.53s（期望 60s，超出 ±3s 容差）。
+            //   这不是"抖动"，是 UI 线程被合成阻塞。
+            //   放宽后 60 秒窗口内最多约 45 次写入，视觉上仍是连续变暗。
+            int step = (int)((60000L - left) / 1000L);
+            if (step == dimLastStep) return;
+            dimLastStep = step;
+
+            double alpha = (60000.0 - (double)left) / 60000.0 * ((double)cfg.DimAlphaMax / 100.0);
+            if (alpha < 0.0) alpha = 0.0;
+            if (dimLastAlpha >= 0.0 && Math.Abs(alpha - dimLastAlpha) < 0.01) return;
+            dimLastAlpha = alpha;
+
+            EnsureDimForms();
+            if (dimForms == null) return;
+
+            for (int i = 0; i < dimForms.Count; i++)
+            {
+                DimForm f = dimForms[i];
+                if (f == null || f.IsDisposed) continue;
+                try
+                {
+                    // Opacity 必须在句柄存在之后才生效，所以先 Show 再设值。
+                    // 构造期已经把 Opacity 压到 0，第一帧不会闪全黑。
+                    if (!f.Visible) f.Show();
+                    f.SetAlpha(alpha);
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>撤掉渐暗层（重复调用安全，没有窗口时什么都不做）。</summary>
+        private void HideDim()
+        {
+            dimLastIdleMs = -1;
+            // 强度记账一并归零：否则"撤掉后重新进窗口"时会因为 alpha 没变而不再写入，
+            // 表现为压暗层再也不出现。所有"不该暗"的分支都会走到这里，所以放这一处即可。
+            dimLastAlpha = -1.0;
+            if (dimForms == null) return;
+
+            for (int i = 0; i < dimForms.Count; i++)
+            {
+                DimForm f = dimForms[i];
+                if (f == null || f.IsDisposed) continue;
+                try
+                {
+                    f.SetAlpha(0.0);
+                    if (f.Visible) f.Hide();
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// 懒创建：DimAlphaMax == 0 时永远走不到这里，所以关闭功能时一个对象都不建。
+        /// 每块屏幕一层，Bounds 就是该屏的物理范围（含任务栏区域 —— 只压工作区会留一条亮边）。
+        /// </summary>
+        private void EnsureDimForms()
+        {
+            if (dimForms != null) return;
+
+            List<DimForm> list = new List<DimForm>();
+            try
+            {
+                Screen[] screens = Screen.AllScreens;
+                for (int i = 0; i < screens.Length; i++)
+                {
+                    list.Add(new DimForm(screens[i].Bounds));
+                }
+            }
+            catch { }
+
+            dimForms = list;
+        }
+
+        /// <summary>释放所有渐暗窗口（退出 / 重建时调用）。</summary>
+        private void DisposeDimForms()
+        {
+            if (dimForms == null) return;
+
+            for (int i = 0; i < dimForms.Count; i++)
+            {
+                DimForm f = dimForms[i];
+                if (f == null) continue;
+                try { f.SetAlpha(0.0); } catch { }
+                try { f.Hide(); } catch { }
+                try { f.Close(); } catch { }
+                try { f.Dispose(); } catch { }
+            }
+            dimForms.Clear();
+            dimForms = null;
+            dimLastStep = -1;
+            dimLastIdleMs = -1;
+            dimLastAlpha = -1.0;
+        }
+
         // ---------- 退出 ----------
         private void ExitApp()
         {
@@ -3367,12 +4148,14 @@ namespace EyeLite
             KeyboardGuard.Uninstall();
             KeyboardGuard.OnSkipKey = null;
             EndPreview();
+            DisposeDimForms();          // A2：渐暗层必须先撤，否则会留在屏幕上
             try { if (previewForm != null) { previewForm.Close(); previewForm.Dispose(); previewForm = null; } } catch { }
             for (int i = 0; i < restForms.Count; i++)
             {
                 try { restForms[i].Close(); restForms[i].Dispose(); } catch { }
             }
             restForms.Clear();
+            DestroyLastIconHandle();    // A3：进度环的 HICON 是我们自己建的，必须自己销毁
             try { tray.Visible = false; tray.Dispose(); } catch { }
             ExitThread();
         }
@@ -3384,16 +4167,35 @@ namespace EyeLite
                 KeyboardGuard.Uninstall();
                 KeyboardGuard.OnSkipKey = null;
                 EndPreview();
+                DisposeDimForms();
                 try { if (previewForm != null) { previewForm.Dispose(); previewForm = null; } } catch { }
                 for (int i = 0; i < restForms.Count; i++)
                 {
                     try { restForms[i].Dispose(); } catch { }
                 }
                 restForms.Clear();
+                DestroyLastIconHandle();
                 if (timer != null) timer.Dispose();
                 if (tray != null) tray.Dispose();
             }
             base.Dispose(disposing);
+        }
+
+        /// <summary>
+        /// 销毁进度环当前这一帧的 Icon。
+        /// 方法名沿用旧名（调用点无需改），实现改为释放那个**拥有句柄**的 Icon 对象。
+        /// </summary>
+        private void DestroyLastIconHandle()
+        {
+            try
+            {
+                if (lastProgressIcon != null)
+                {
+                    lastProgressIcon.Dispose();
+                    lastProgressIcon = null;
+                }
+            }
+            catch { }
         }
 
         // ---------- P/Invoke ----------
@@ -3424,6 +4226,10 @@ namespace EyeLite
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
                                                 int X, int Y, int cx, int cy, uint uFlags);
+
+        // A3：Icon.FromHandle 拿到的是"不归托管代码管"的 HICON，换图前必须自己销毁。
+        [DllImport("user32.dll")]
+        private static extern bool DestroyIcon(IntPtr hIcon);
 
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         private const uint SWP_NOSIZE = 0x0001;

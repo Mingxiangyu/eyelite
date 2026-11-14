@@ -23,6 +23,14 @@ EyeLite 若吞掉某键 -> 该事件到不了观察钩子 -> 观察钩子看不�
 注意 EyeLite 是**休息开始时**才装钩子（BeginRest 里 KeyboardGuard.Install），
 所以观察钩子必须先于遮罩弹出就装好 —— 这正好符合上面的要求。
 
+### 踩坑记录（2026-11-14，新 build）
+A2 的 DimForm（休息前 60 秒渐进压暗）铺满整块屏幕，尺寸同样 w>800 h>500，
+WorkMinutes=1 时启动后 ~1 秒就出现。只按尺寸判遮罩会把它当成"遮罩已弹出"，
+于是 [对照2] 与跳过判定全部打在压暗层上。区分依据（源码 2146-2196 vs 1264-1320）：
+  · DimForm：带 WS_EX_TRANSPARENT(0x20，鼠标穿透) 且**没有子窗口**
+  · RestForm：有 Label / RingMeter / 按钮，**子窗口 >= 1**，且无 TRANSPARENT
+压暗层单独记为信息项（dim），不参与判定。
+
 ### 三段式判定
   对照1（工作阶段）：观察钩子应看到 pre -> 证明注入通道成立
   对照2（遮罩期间）：R1 下观察钩子**不应**看到 xy -> 证明观察钩子确实在 EyeLite 下游、
@@ -73,6 +81,31 @@ u.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
                                         ctypes.POINTER(wintypes.DWORD)]
 u.GetWindowThreadProcessId.restype = wintypes.DWORD
 u.GetForegroundWindow.restype = wintypes.HWND
+
+# ---- 遮罩判据的两个辅助（见顶部踩坑记录）----
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+u.GetWindowLongW.restype = ctypes.c_long
+u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+
+DIM_SEEN = [False]       # 压暗层是否出现过（信息项，不参与判定）
+
+
+def ex_style(hwnd):
+    return u.GetWindowLongW(hwnd, GWL_EXSTYLE)
+
+
+def child_count(hwnd):
+    """子窗口数：遮罩里有 Label / 环形 / 按钮，压暗层一个都没有。"""
+    n = [0]
+    PROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(h, l):
+        n[0] += 1
+        return True
+
+    u.EnumChildWindows(hwnd, PROC(cb), 0)
+    return n[0]
 
 # 配置与产物路径：默认按仓库根目录推导，可用环境变量覆盖
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -191,8 +224,12 @@ def overlays(pid):
         if p.value == pid and u.IsWindowVisible(h):
             r = wintypes.RECT()
             u.GetWindowRect(h, ctypes.byref(r))
-            if (r.right - r.left) > 1200 and (r.bottom - r.top) > 700:
-                hits.append(h)
+            w, hh = r.right - r.left, r.bottom - r.top
+            if w > 800 and hh > 500:
+                if ex_style(h) & WS_EX_TRANSPARENT:
+                    DIM_SEEN[0] = True      # 压暗层：信息项，不算遮罩
+                elif child_count(h) >= 1:
+                    hits.append(h)
         return True
 
     u.EnumWindows(PROC(cb), 0)
@@ -364,7 +401,11 @@ def run_case(strict):
 def main():
     strict = int(sys.argv[1]) if len(sys.argv) > 1 else 1
     try:
-        return run_case(strict)
+        rc = run_case(strict)
+        # 压暗层信息项：让后来的人看到 dim=yes 时不会把它当成遮罩
+        say('[信息] 压暗层 DimForm 出现过=%s（它不是遮罩：TRANSPARENT 且无子窗口，'
+            '不参与判定）', DIM_SEEN[0])
+        return rc
     except Exception:
         import traceback
         say('EXCEPTION: %s', traceback.format_exc())

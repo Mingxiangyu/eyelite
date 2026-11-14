@@ -19,7 +19,14 @@ P0-C 真机实测：FullscreenDndGate（系统通知状态闸门）
 
 窗口识别（与 p0b-preview-check.py 同一套判据）：
   preview  = 可见 + 200 < w <= 900 + h <= 300
-  overlay  = 可见 + w > 800 and h > 500
+  overlay  = 可见 + w > 800 + h > 500 + 非 WS_EX_TRANSPARENT + 子窗口 >= 1
+
+**踩坑记录 3（2026-11-14，新 build）**：A2 的 DimForm（休息前 60 秒渐进压暗）铺满整块
+屏幕，尺寸同样 w>800 h>500，且 WorkMinutes=1 时启动后 ~1 秒就出现 —— 只按尺寸判遮罩
+会把它当成"遮罩立刻出现"，所有用例假 FAIL。区分依据（源码 2146-2196 vs 1264-1320）：
+  · DimForm：带 WS_EX_TRANSPARENT(0x20，鼠标穿透) 且**没有子窗口**
+  · RestForm：有 Label / RingMeter / 按钮，**子窗口 >= 1**，且无 TRANSPARENT
+压暗层单独记为信息项（dim），不参与 PASS/FAIL。
 """
 
 import ctypes
@@ -39,6 +46,30 @@ CFG = os.path.join(CFG_DIR, 'config.ini')
 user32 = ctypes.WinDLL('user32', use_last_error=True)
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+
+# ---- 遮罩判据的两个辅助（见顶部踩坑记录 3）----
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+user32.GetWindowLongW.restype = ctypes.c_long
+user32.GetWindowLongW.argtypes = [wt.HWND, ctypes.c_int]
+
+DIM_SEEN = [False]       # 压暗层是否出现过（信息项，不参与判定）
+
+
+def ex_style(hwnd):
+    return user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+
+
+def child_count(hwnd):
+    """子窗口数：遮罩里有 Label / 环形 / 按钮，压暗层一个都没有。"""
+    n = [0]
+
+    def cb(ch, lparam):
+        n[0] += 1
+        return True
+
+    user32.EnumChildWindows(hwnd, EnumWindowsProc(cb), 0)
+    return n[0]
 
 
 def list_windows():
@@ -105,7 +136,20 @@ def overlay_windows():
     # **必须按 PID 过滤**：Windows 桌面（Program Manager / WorkerW）本身就是
     # 一个 3840x2160 的可见顶层窗口，不按进程过滤会把它当成遮罩，
     # 表现为"overlay 立刻出现"，所有用例全错。
-    return [t for t in _own_windows() if t[1] > 800 and t[2] > 500]
+    #
+    # 还必须排除压暗层（DimForm）：它同样铺满屏幕，但带 WS_EX_TRANSPARENT
+    # 且没有子窗口 —— 只按尺寸判会让每条用例都误报"遮罩立刻出现"。
+    out = []
+    for hwnd, w, h, pid in _own_windows():
+        if not (w > 800 and h > 500):
+            continue
+        if ex_style(hwnd) & WS_EX_TRANSPARENT:
+            DIM_SEEN[0] = True          # 压暗层：只记信息，不算遮罩
+            continue
+        if child_count(hwnd) < 1:
+            continue
+        out.append((hwnd, w, h, pid))
+    return out
 
 
 def stop_eyelite():
@@ -231,6 +275,7 @@ def main():
             cfg['SuppressOnFullscreen'] = suppress
             write_cfg(cfg)
             launch(quns=quns)
+            DIM_SEEN[0] = False        # 每个用例单独统计压暗层（信息项）
             time.sleep(2.0)   # 让进程起来
 
             # 工作 1 分钟 → 预告横幅约在 30s 出现，遮罩约在 60s 出现。
@@ -252,9 +297,10 @@ def main():
             # 期望：弹遮罩的用例 → 必须有遮罩，且必须有预告横幅（走正常 P0-B 流程）；
             #       抑制的用例   → 遮罩与横幅**都不该有**（横幅也要被压住）。
             ok = (got_overlay == expect_overlay) and (got_preview == expect_overlay)
-            detail = 'preview=%s overlay=%s' % (
+            detail = 'preview=%s overlay=%s dim=%s' % (
                 ('%.1fs' % first_preview) if first_preview is not None else 'no',
-                ('%.1fs' % first_overlay) if first_overlay is not None else 'no')
+                ('%.1fs' % first_overlay) if first_overlay is not None else 'no',
+                'yes' if DIM_SEEN[0] else 'no')
             results.append((name, ok, detail, expect_overlay))
             print('%-42s %s  %s (expect overlay=%s)'
                   % (name, 'PASS' if ok else 'FAIL', detail, expect_overlay))
