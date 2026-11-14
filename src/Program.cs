@@ -563,7 +563,7 @@ namespace EyeLite
         // 静态字段持有委托，防止 GC 回收导致回调野指针
         private static HookProc proc = new HookProc(HookCallback);
         private static IntPtr hookHandle = IntPtr.Zero;
-        private static bool active = false;
+        private static volatile bool active = false;
 
         // 跳过键（裸 Esc / 空格）的回调：遮罩按设计不抢焦点（见 RestForm.ShowWithoutActivation），
         // 窗体的 KeyDown 永远收不到键，跳过完全靠这个全局钩子兜住。
@@ -638,7 +638,9 @@ namespace EyeLite
         //   ③ 2 秒定时器兜底，最多续期 3 次（合计 8 秒）后强制卸载
         //      —— 防止某个键物理卡住时钩子永久挂着、整个键盘都不能用。
         // ------------------------------------------------------------
-        private static int drainVk = 0;
+        // drainVk / drainRearms 被 timer 线程写、被钩子线程读，加 volatile 消除数据竞争。
+        //（hookHandle 是 IntPtr，不能加 volatile，它只在 UI 线程与 ExitApp 里用，风险低。）
+        private static volatile int drainVk = 0;
         private static int drainRearms = 0;
         private static System.Threading.Timer drainTimer;
 
@@ -921,7 +923,8 @@ namespace EyeLite
             this.ShowInTaskbar = false;
             this.BackColor = Ui.GradTop;
             this.Opacity = TargetOpacity;
-            this.KeyPreview = true;
+            // 这里原来有 this.KeyPreview = true —— 随 KeyDown 处理器一起删掉了：
+            // 窗体永不成前台（WS_EX_NOACTIVATE），也没有键处理器，KeyPreview 无任何行为。
             this.AutoScaleMode = AutoScaleMode.None;
             this.DoubleBuffered = true;
 
@@ -1871,6 +1874,8 @@ namespace EyeLite
                 // 也不能把用户留在"钩子在跑、遮罩没出来"的状态里。
                 try { isResting = false; } catch { }
                 try { KeyboardGuard.OnSkipKey = null; } catch { }
+                // 自愈场景必须立即脱钩，**不要改成 RequestUninstall()** ——
+                // 已经出异常了，再等 keyup 只会把风险窗口拉长到 2 秒。
                 try { KeyboardGuard.Uninstall(); } catch { }
                 try
                 {
