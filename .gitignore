@@ -1,0 +1,20 @@
+# 构建产物
+EyeLite.exe
+obj/
+bin/
+
+# 运行产物
+logs/
+*.log
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.user
+
+# 系统
+Thumbs.db
+.DS_Store
+
+# 本机推送配置（不含敏感信息也不该进仓库）
+.github-push.json
