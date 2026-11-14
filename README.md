@@ -34,7 +34,7 @@ EyeLite 是一个只做一件事的 Windows 托盘程序：每隔 N 分钟弹出
 
 ![EyeLite 休息遮罩](docs/screenshots/rest-overlay.jpg)
 
-多显示器下每块屏幕各有一层遮罩，各屏按自身尺寸独立排版、都带操作按钮（下图为主屏 4K + 副屏 2K 的实际效果）：
+多显示器下每块屏幕各有一层遮罩，各屏按自身尺寸独立排版、都带操作按钮（下图为两块屏同时生效的效果）：
 
 ![多显示器效果](docs/screenshots/dual-monitor.jpg)
 
