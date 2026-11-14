@@ -955,6 +955,10 @@ namespace EyeLite
         public bool StrictMode = true;
         public bool StartWithWindows = false;
 
+        // 到点前多少秒出预告横幅（0 = 不预告，直接全屏遮罩）。
+        // 竞品 憩目 Qimu 用的是 30 秒；这是 P0-B「30 秒预告 + 三出口」的参数。
+        public int PreviewSeconds = 30;
+
         // 久坐/活动是**第二套时钟**，与护眼节奏独立：
         // 护眼（WorkMinutes/RestSeconds）管"看远处 20 秒"，久坐管"45 分钟起身 2 分钟"。
         public bool SedentaryEnabled = true;
@@ -1007,6 +1011,7 @@ namespace EyeLite
                         case "SoundEnabled": c.SoundEnabled = v == "1"; break;
                         case "StrictMode": c.StrictMode = v == "1"; break;
                         case "StartWithWindows": c.StartWithWindows = v == "1"; break;
+                        case "PreviewSeconds": c.PreviewSeconds = Clamp(v, 30, 0, 300); break;
                         case "SedentaryEnabled": c.SedentaryEnabled = v == "1"; break;
                         case "SedentaryMinutes": c.SedentaryMinutes = Clamp(v, 45, 15, 180); break;
                         case "SedentarySeconds": c.SedentarySeconds = Clamp(v, 120, 30, 300); break;
@@ -1046,6 +1051,7 @@ namespace EyeLite
                 sb.AppendLine("SoundEnabled=" + (SoundEnabled ? "1" : "0"));
                 sb.AppendLine("StrictMode=" + (StrictMode ? "1" : "0"));
                 sb.AppendLine("StartWithWindows=" + (StartWithWindows ? "1" : "0"));
+            sb.AppendLine("PreviewSeconds=" + PreviewSeconds);
                 sb.AppendLine("SedentaryEnabled=" + (SedentaryEnabled ? "1" : "0"));
                 sb.AppendLine("SedentaryMinutes=" + SedentaryMinutes);
                 sb.AppendLine("SedentarySeconds=" + SedentarySeconds);
@@ -1663,21 +1669,284 @@ namespace EyeLite
         }
     }
 
+    /// <summary>
+    /// 到点前的**小横幅预告**（P0-B「30 秒预告 + 三出口」）。
+    ///
+    /// 三条铁律，任何一条都不能破：
+    ///   1. **绝不抢焦点**（WS_EX_NOACTIVATE + ShowWithoutActivation）——
+    ///      抢焦点会打断用户正在进行的输入法组词（未上屏内容丢失）。
+    ///   2. **绝不装键盘钩子** —— 预告期间用户的键盘完全不受影响。
+    ///      这是"预告不打扰"的前提，也是它与"严格模式"解耦的地方：
+    ///      严格模式的吞键只发生在真正的休息遮罩期间，预告期一律零键盘干预。
+    ///   3. **只给鼠标出口**（延后 / 跳过 / 立即休息），不做键盘快捷键 ——
+    ///      键盘快捷键必然要在钩子里判键，又会把"影响输入"的风险引回来。
+    ///
+    /// 位置：跟随鼠标所在的那块屏幕（用户正在看的那块），右下角、任务栏之上。
+    /// 样式：沿用遮罩的深色配色，让它一眼能认出是 EyeLite，但体量小得多。
+    /// </summary>
+    internal class PreviewForm : Form
+    {
+        private Label lblEyebrow;      // 「休息提醒」
+        private Label lblBody;         // 一句话说明
+        private Label lblCount;        // 剩余秒数（大号等宽数字）
+        private Label lblCountUnit;    // 「秒」
+        private RoundButton btnPostpone, btnSkip, btnNow;
+
+        private int lastCount = -1;
+        private string lastBody = "";
+        private GraphicsPath shapePath;
+        private Size shapeSize = Size.Empty;
+
+        private float dpiScale = 1f;
+
+        private int Sc(int px)
+        {
+            return (int)(px * dpiScale + 0.5f);
+        }
+
+        public event EventHandler RequestPostpone;
+        public event EventHandler RequestSkip;
+        public event EventHandler RequestNow;
+
+        public PreviewForm()
+        {
+            dpiScale = Ui.DetectScale(this);
+
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.StartPosition = FormStartPosition.Manual;
+            this.ShowInTaskbar = false;
+            this.TopMost = true;
+            this.BackColor = Ui.GradTop;
+            this.AutoScaleMode = AutoScaleMode.None;
+            this.DoubleBuffered = true;
+            this.Font = Ui.FontUi;
+
+            int w = Sc(400);
+            int h = Sc(136);
+
+            // ---- 眉标 ----
+            lblEyebrow = new Label();
+            lblEyebrow.Text = "休息提醒";
+            lblEyebrow.ForeColor = Ui.EyebrowText;
+            lblEyebrow.Font = Ui.FontRestEyebrow;
+            lblEyebrow.TextAlign = ContentAlignment.MiddleLeft;
+            lblEyebrow.AutoSize = false;
+            lblEyebrow.BackColor = Color.Transparent;
+            lblEyebrow.SetBounds(Sc(20), Sc(14), Sc(200), Sc(24));
+            this.Controls.Add(lblEyebrow);
+
+            // ---- 倒计时数字（大号）+ 单位 ----
+            lblCount = new Label();
+            lblCount.ForeColor = Ui.TimeText;
+            lblCount.Font = Ui.GetTimeFont(Sc(38));
+            lblCount.TextAlign = ContentAlignment.MiddleRight;
+            lblCount.AutoSize = false;
+            lblCount.BackColor = Color.Transparent;
+            lblCount.SetBounds(w - Sc(96), Sc(12), Sc(56), Sc(44));
+            this.Controls.Add(lblCount);
+
+            lblCountUnit = new Label();
+            lblCountUnit.Text = "秒";
+            lblCountUnit.ForeColor = Ui.RingLabel;
+            lblCountUnit.Font = Ui.FontTip;
+            lblCountUnit.TextAlign = ContentAlignment.MiddleLeft;
+            lblCountUnit.AutoSize = false;
+            lblCountUnit.BackColor = Color.Transparent;
+            lblCountUnit.SetBounds(w - Sc(38), Sc(24), Sc(24), Sc(20));
+            this.Controls.Add(lblCountUnit);
+
+            // ---- 说明文案 ----
+            lblBody = new Label();
+            lblBody.ForeColor = Ui.HintText;
+            lblBody.Font = Ui.FontHint;
+            lblBody.TextAlign = ContentAlignment.MiddleLeft;
+            lblBody.AutoSize = false;
+            lblBody.BackColor = Color.Transparent;
+            lblBody.SetBounds(Sc(20), Sc(44), w - Sc(120), Sc(30));
+            this.Controls.Add(lblBody);
+
+            // ---- 三出口按钮 ----
+            int bw = Math.Max(1, Sc(1));
+            int by = Sc(92);
+            int bh = Sc(34);
+
+            btnPostpone = new RoundButton("延后", Sc(15),
+                                          Ui.DarkBtnBg, Ui.DarkBtnHover,
+                                          Ui.DarkBtnText, Ui.DarkBtnBorder, bw);
+            btnPostpone.Font = Ui.FontRowLabel;
+            btnPostpone.SetBounds(Sc(20), by, Sc(104), bh);
+            btnPostpone.Click += delegate
+            {
+                if (RequestPostpone != null) RequestPostpone(this, EventArgs.Empty);
+            };
+            this.Controls.Add(btnPostpone);
+
+            btnSkip = new RoundButton("跳过", Sc(15),
+                                      Ui.DarkBtnBg, Ui.DarkBtnHover,
+                                      Ui.DarkBtnText, Ui.DarkBtnBorder, bw);
+            btnSkip.Font = Ui.FontRowLabel;
+            btnSkip.SetBounds(Sc(134), by, Sc(84), bh);
+            btnSkip.Click += delegate
+            {
+                if (RequestSkip != null) RequestSkip(this, EventArgs.Empty);
+            };
+            this.Controls.Add(btnSkip);
+
+            // 「立即休息」是主动作：描边用强调色，视觉上区别于两个次要出口
+            btnNow = new RoundButton("立即休息", Sc(15),
+                                     Ui.DarkBtnBg, Ui.DarkBtnHover,
+                                     Ui.SkipText, Ui.Accent, bw);
+            btnNow.Font = Ui.FontRowLabel;
+            btnNow.SetBounds(Sc(228), by, Sc(152), bh);
+            btnNow.Click += delegate
+            {
+                if (RequestNow != null) RequestNow(this, EventArgs.Empty);
+            };
+            this.Controls.Add(btnNow);
+
+            this.Size = new Size(w, h);
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000;   // WS_EX_NOACTIVATE：不抢焦点
+                cp.ExStyle |= 0x00000080;   // WS_EX_TOOLWINDOW：不进 Alt+Tab、不占任务栏
+                return cp;
+            }
+        }
+
+        // ---- 圆角：Region 裁形状（与 RoundPanel 同一手法）----
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            RebuildShape();
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            RebuildShape();
+        }
+
+        private void RebuildShape()
+        {
+            Size s = this.ClientSize;
+            if (s.Width <= 4 || s.Height <= 4) return;
+            if (shapePath != null && shapeSize.Width == s.Width && shapeSize.Height == s.Height) return;
+
+            int r = Sc(12);
+            int maxR = Math.Min(s.Width, s.Height) / 2 - 1;
+            if (r > maxR) r = maxR;
+            if (r < 2) r = 2;
+
+            if (shapePath != null) { shapePath.Dispose(); shapePath = null; }
+            shapeSize = s;
+            shapePath = Ui.RoundedRect(new Rectangle(0, 0, s.Width - 1, s.Height - 1), r);
+
+            Region old = this.Region;
+            this.Region = new Region(shapePath);
+            if (old != null) old.Dispose();
+        }
+
+        /// <summary>把横幅移到指定屏幕的右下角（任务栏之上）。</summary>
+        public void MoveToScreen(Screen screen)
+        {
+            try
+            {
+                Rectangle wa = screen.WorkingArea;
+                int x = wa.Right - this.Width - Sc(24);
+                int y = wa.Bottom - this.Height - Sc(16);
+                if (x < wa.Left + Sc(8)) x = wa.Left + Sc(8);
+                if (y < wa.Top + Sc(8)) y = wa.Top + Sc(8);
+                this.Location = new Point(x, y);
+            }
+            catch { }
+        }
+
+        /// <summary>更新倒计时与文案。值没变就完全不重绘（每秒调用一次，零分配）。</summary>
+        public void SetCountdown(int seconds, string body)
+        {
+            if (seconds < 0) seconds = 0;
+            if (seconds == lastCount && body == lastBody) return;
+            lastCount = seconds;
+            lastBody = body;
+            if (lblCount != null) lblCount.Text = seconds.ToString();
+            if (lblBody != null) lblBody.Text = body;
+        }
+
+        /// <summary>设置三个出口的文案（推迟按钮要显示具体分钟数）。</summary>
+        public void SetPostponeText(string text)
+        {
+            if (btnPostpone != null && btnPostpone.Text != text)
+            {
+                btnPostpone.Text = text;
+                btnPostpone.Invalidate();
+            }
+        }
+
+        public void ShowPreview()
+        {
+            try
+            {
+                this.Opacity = 0.96;
+                this.Visible = true;
+                this.TopMost = true;
+            }
+            catch
+            {
+                try { this.Visible = true; } catch { }
+            }
+        }
+
+        public void HidePreview()
+        {
+            try { this.Visible = false; } catch { }
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            try { g.Clear(Ui.GradTop); }
+            catch { }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (shapePath != null) { shapePath.Dispose(); shapePath = null; }
+                Region reg = this.Region;
+                base.Dispose(disposing);
+                if (reg != null) reg.Dispose();
+                return;
+            }
+            base.Dispose(disposing);
+        }
+    }
+
     // ================================================================
     // 6. 设置窗体（浅色卡片式）
     // ================================================================
     internal class SettingsForm : Form
     {
         private NumericUpDown numWork, numRest, numPomoWork, numPomoRest,
-                              numSedMinutes, numSedSeconds, numPostpone, numIdle;
+                              numSedMinutes, numSedSeconds, numPostpone, numIdle, numPreview;
         private CheckBox chkPomodoro, chkSedentary, chkAllowSkip, chkSound, chkStrict, chkAutoStart;
 
         // 版式常量（以下全部是 96dpi 下的设计值，运行时一律经 Sc() 乘 DPI 因子）
-        // 设计基准客户区 520 x 888：
-        //   88(页头) + 112(节奏) + 16 + 144(番茄钟) + 16 + 144(久坐与活动) + 16
-        //   + 272(行为，7 行) + 24 + 38(按钮) + 18(底部留白) = 888
+        // 设计基准客户区 520 x 920：
+        //   88(页头) + 144(节奏，3 行) + 16 + 144(番茄钟) + 16 + 144(久坐与活动) + 16
+        //   + 272(行为，7 行) + 24 + 38(按钮) + 18(底部留白) = 920
         private const int FormW = 520;
-        private const int FormH = 888;
+        private const int FormH = 920;
         private const int CardLeft = 24;
         private const int CardWidth = 472;      // 520 - 24 * 2
         private const int CardPad = 22;         // 卡片左右内边距
@@ -1786,12 +2055,15 @@ namespace EyeLite
             lblVersion.SetBounds(Sc(8), 0, chipW - Sc(16), chipH);
             chipVersion.Controls.Add(lblVersion);
 
-            // ---------- 卡片 1：节奏（2 行）----------
+            // ---------- 卡片 1：节奏（3 行）----------
             int y = Sc(88);
-            RoundPanel card1 = AddCard(y, Sc(112), "节奏");
+            RoundPanel card1 = AddCard(y, Sc(144), "节奏");
             numWork = AddRow(card1, Sc(FirstRowTop), "工作时长（分钟）", 1, 240, cfg.WorkMinutes);
             numRest = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight), "休息时长（秒）", 5, 1800, cfg.RestSeconds);
-            y += Sc(112) + Sc(Gap);
+            // 预告窗口（P0-B）：0 = 不预告，直接到点全屏遮罩。
+            // 放在「节奏」卡而不是「行为」卡，因为它改的是提醒**时机**而不是行为约束。
+            numPreview = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight) * 2, "提前预告（秒，0=不预告）", 0, 300, cfg.PreviewSeconds);
+            y += Sc(144) + Sc(Gap);
 
             // ---------- 卡片 2：番茄钟（3 行）----------
             RoundPanel card2 = AddCard(y, Sc(144), "番茄钟");
@@ -1956,6 +2228,7 @@ namespace EyeLite
             cfg.AllowSkip = chkAllowSkip.Checked;
             cfg.PostponeMinutes = (int)numPostpone.Value;
             cfg.IdleMinutes = (int)numIdle.Value;
+            cfg.PreviewSeconds = (int)numPreview.Value;
             cfg.SoundEnabled = chkSound.Checked;
             cfg.StrictMode = chkStrict.Checked;
             cfg.StartWithWindows = chkAutoStart.Checked;
@@ -2009,6 +2282,14 @@ namespace EyeLite
         private int workRemaining = 0;        // 工作剩余秒数（每次 tick 重算后给 UI 用）
         private int sedRemaining = 0;         // 久坐剩余秒数（每次 tick 重算后给 UI 用）
         private int lastShown = -1;
+
+        // ---- 预告状态（P0-B）----
+        // 到点前 PreviewSeconds 秒，横幅出现，给三个出口：延后 / 跳过 / 立即休息。
+        // 预告期间**不装键盘钩子、不吞任何按键**，鼠标点按钮才生效。
+        private bool isPreviewing = false;
+        private bool previewIsBody = false;     // 预告的是"活动一下"还是普通护眼休息
+        private int previewRemaining = 0;
+        private PreviewForm previewForm;
 
         // 休息开始时的前台窗口；休息结束若发现前台被我们占了就还回去（安全网）
         private IntPtr savedForeground = IntPtr.Zero;
@@ -2245,8 +2526,61 @@ namespace EyeLite
                     bool sedDue = cfg.SedentaryEnabled && sedLimitMs > 0 && sedAccumMs >= sedLimitMs;
                     bool workDue = workLimitMs > 0 && workAccumMs >= workLimitMs;
 
+                    // ---- 预告窗口（P0-B）----
+                    // 到点前 PreviewSeconds 秒，横幅出现给三出口。
+                    // 判定用**剩余时间**而不是绝对时刻：剩余时间进入 [0, 预览窗口] 即进预告。
+                    if (isPreviewing)
+                    {
+                        // 预告期间又到点了（预览窗口内正好到点）→ 直接进休息
+                        if (sedDue || workDue)
+                        {
+                            EndPreview();
+                            BeginRest(sedDue);
+                            return;
+                        }
+                        // 人走开了 / 暂停了 → 收起横幅，别在没人时挂着
+                        if (paused || idle)
+                        {
+                            EndPreview();
+                            RefreshRemaining();
+                            UpdateTrayText();
+                            return;
+                        }
+                        UpdatePreviewCountdown();
+                        RefreshRemaining();
+                        UpdateTrayText();
+                        return;
+                    }
+
                     if (sedDue) { BeginRest(true); return; }
                     if (workDue) { BeginRest(false); return; }
+
+                    // 进预告窗口了吗？
+                    if (!paused && !idle && cfg.PreviewSeconds > 0)
+                    {
+                        long win = (long)cfg.PreviewSeconds * 1000L;
+                        long workLeft = workLimitMs - workAccumMs;
+                        long sedLeft = sedLimitMs - sedAccumMs;
+
+                        bool workWin = workLimitMs > 0 && workLeft <= win;
+                        bool sedWin = cfg.SedentaryEnabled && sedLimitMs > 0 && sedLeft <= win;
+
+                        // 两套时钟同时进窗口时，选**更早到点**的那个先预告
+                        if (workWin && sedWin)
+                        {
+                            if (sedLeft <= workLeft) StartPreview(true);
+                            else StartPreview(false);
+                        }
+                        else if (sedWin) StartPreview(true);
+                        else if (workWin) StartPreview(false);
+
+                        if (isPreviewing)
+                        {
+                            RefreshRemaining();
+                            UpdateTrayText();
+                            return;
+                        }
+                    }
 
                     RefreshRemaining();
                     UpdateTrayText();
@@ -2274,6 +2608,154 @@ namespace EyeLite
             }
         }
 
+        // ================================================================
+        // 预告横幅（P0-B「30 秒预告 + 三出口」）
+        // ================================================================
+        //
+        // 语义定义（三个出口各自对应什么）：
+        //   延后      → 与休息遮罩上的「推迟 N 分钟」一致：本轮不结束，阈值后移
+        //   跳过      → 本轮作废，满周期重新计时（契约 §3：跳过 = 满周期重新计时）
+        //   立即休息  → 现在就开始这一轮休息
+        //
+        // 预告期的三条硬约束：
+        //   · 不装键盘钩子（KeyboardGuard 在这里完全不参与）
+        //   · 不抢焦点（WS_EX_NOACTIVATE）
+        //   · 只有鼠标出口，没有键盘快捷键
+        // 这三条保证"预告"对用户输入零影响 —— 用户要求的"不要再出现 Ctrl 卡住"
+        // 在预告期是结构性保证，不依赖任何运行时判断。
+        // ================================================================
+
+        private void StartPreview(bool bodyBreak)
+        {
+            if (isPreviewing) return;
+
+            try
+            {
+                if (previewForm == null)
+                {
+                    previewForm = new PreviewForm();
+                    previewForm.RequestPostpone += delegate
+                    {
+                        // 延后 = 与休息遮罩上的推迟同义：阈值后移，累加器不清零
+                        if (!isPreviewing) return;
+                        EndPreview();
+                        PostponeWork();
+                    };
+                    previewForm.RequestSkip += delegate
+                    {
+                        // 跳过 = 本轮作废，满周期重新计时
+                        if (!isPreviewing) return;
+                        EndPreview();
+                        ResetWork();
+                        UpdateTrayText();
+                    };
+                    previewForm.RequestNow += delegate
+                    {
+                        // 立即休息 = 现在就开始
+                        if (!isPreviewing) return;
+                        bool body = previewIsBody;
+                        EndPreview();
+                        BeginRest(body);
+                    };
+                }
+
+                isPreviewing = true;
+                previewIsBody = bodyBreak;
+
+                // 先把倒计时算出来再 SetCountdown：StartPreview 里不能拿上一轮的
+                // previewRemaining 显示，否则横幅第一帧会闪一个旧值。
+                long leftMs = bodyBreak ? (sedLimitMs - sedAccumMs) : (workLimitMs - workAccumMs);
+                if (leftMs < 0) leftMs = 0;
+                previewRemaining = (int)((leftMs + 999) / 1000);
+
+                // 横幅落在鼠标所在的那块屏幕（用户正在看的那块）
+                Screen target = null;
+                try
+                {
+                    Point cur = Cursor.Position;
+                    target = Screen.FromPoint(cur);
+                }
+                catch { }
+                if (target == null)
+                {
+                    try { target = Screen.PrimaryScreen; } catch { }
+                }
+                if (target != null) previewForm.MoveToScreen(target);
+
+                previewForm.SetPostponeText("延后 " + cfg.PostponeMinutes + " 分");
+                string bodyText = bodyBreak
+                    ? "该起身活动一下了"
+                    : (cfg.PomodoroEnabled ? "这一轮番茄钟快结束了" : "快到休息时间了");
+                previewForm.SetCountdown(previewRemaining, bodyText);
+                previewForm.ShowPreview();
+            }
+            catch
+            {
+                // 预告横幅出问题绝不能影响主流程：直接放弃预告，照常到点弹遮罩
+                isPreviewing = false;
+            }
+        }
+
+        private void EndPreview()
+        {
+            if (!isPreviewing) return;
+            isPreviewing = false;
+            previewRemaining = 0;
+            try { if (previewForm != null) previewForm.HidePreview(); } catch { }
+        }
+
+        /// <summary>每秒刷新横幅上的倒计时（值没变不重绘）。</summary>
+        private void UpdatePreviewCountdown()
+        {
+            if (!isPreviewing) return;
+
+            long left;
+            string body;
+            if (previewIsBody)
+            {
+                left = sedLimitMs - sedAccumMs;
+                body = "该起身活动一下了";
+            }
+            else
+            {
+                left = workLimitMs - workAccumMs;
+                body = cfg.PomodoroEnabled ? "这一轮番茄钟快结束了" : "快到休息时间了";
+            }
+            if (left < 0) left = 0;
+
+            int sec = (int)((left + 999) / 1000);
+            if (sec != previewRemaining)
+            {
+                previewRemaining = sec;
+                try
+                {
+                    if (previewForm != null)
+                        previewForm.SetCountdown(sec, body);
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// 推迟当前这一轮：阈值后移，累加器不清零（契约 §3「推迟 = 本轮不结束，只改到期时刻」）。
+        /// 休息遮罩上的「推迟」按钮与预告横幅上的「延后」按钮共用这一段逻辑。
+        /// </summary>
+        private void PostponeWork()
+        {
+            long now = Clock.NowMs();
+            long dt = Clock.DeltaMs(now, lastAnchorMs);
+            lastAnchorMs = now;
+
+            workLimitMs += (long)cfg.PostponeMinutes * 60L * 1000L;
+            if (cfg.SedentaryEnabled && sedLimitMs > 0)
+            {
+                sedLimitMs = Math.Max(sedLimitMs, (long)cfg.SedentaryMinutes * 60L * 1000L);
+                sedLimitMs += (long)cfg.PostponeMinutes * 60L * 1000L;
+            }
+            RefreshRemaining();
+            UpdateTrayText();
+        }
+
         /// <summary>
         /// 开始一次休息。
         /// bodyBreak=true 表示这是久坐触发的「活动一下」，时长取 SedentarySeconds；
@@ -2282,6 +2764,10 @@ namespace EyeLite
         /// </summary>
         private void BeginRest(bool bodyBreak)
         {
+            // 预告横幅若还挂着必须先收起：两套 UI 同时可见会互相遮挡。
+            // （正常路径上预告到点已经在 OnTick 里 EndPreview 过，这里是兜底。）
+            EndPreview();
+
             // 记下当时的前台窗口，休息结束时若前台被我们占了就还回去。
             // 遮罩是 WS_EX_NOACTIVATE，理论上不会抢，这是点击按钮等情况下的保险。
             try { savedForeground = GetForegroundWindow(); }
@@ -2454,26 +2940,8 @@ namespace EyeLite
                 {
                     EndRest(false);
                     // 推迟 = 本轮**不结束**，只改到期时刻（契约 §3），计数不清零。
-                    // 久坐时钟必须一起推迟：否则 sedAccumMs 还停在过去，
-                    // 下一秒 tick 会立刻再次 BeginRest(true)，
-                    // 「推迟」就成了"推迟 5 分钟后马上又弹活动遮罩"的死循环。
-                    long now = Clock.NowMs();
-                    long dt = Clock.DeltaMs(now, lastAnchorMs);
-                    lastAnchorMs = now;
-
-                    // 推迟的语义是"本轮不结束，只把到期推后"：
-                    // 累加器**不清零**，只把阈值往前推一个 PostponeMinutes。
-                    workLimitMs += (long)cfg.PostponeMinutes * 60L * 1000L;
-                    if (cfg.SedentaryEnabled && sedLimitMs > 0)
-                    {
-                        // 久坐的累加器也要清零后再重新起算，否则"已坐了 44 分钟、
-                        // 推迟 5 分钟后 1 分钟就又到点"会很突兀。
-                        // 语义与护眼一致：推迟 = 本轮不结束，阈值后移。
-                        sedLimitMs = Math.Max(sedLimitMs, (long)cfg.SedentaryMinutes * 60L * 1000L);
-                        sedLimitMs += (long)cfg.PostponeMinutes * 60L * 1000L;
-                    }
-                    RefreshRemaining();
-                    UpdateTrayText();
+                    // 与预告横幅上的「延后」共用同一段逻辑，避免两处语义分叉。
+                    PostponeWork();
                 };
                 restForms.Add(f);
             }
@@ -2498,6 +2966,7 @@ namespace EyeLite
                 string s;
                 if (paused) s = "已暂停 · 右键可恢复";
                 else if (isResting) s = "休息中 " + restRemaining + " 秒";
+                else if (isPreviewing) s = "即将休息 " + previewRemaining + " 秒";
                 else if (IsIdleTooLong()) s = "检测到离开，计时已暂停";
                 else
                 {
@@ -2629,6 +3098,8 @@ namespace EyeLite
             try { timer.Stop(); } catch { }
             KeyboardGuard.Uninstall();
             KeyboardGuard.OnSkipKey = null;
+            EndPreview();
+            try { if (previewForm != null) { previewForm.Close(); previewForm.Dispose(); previewForm = null; } } catch { }
             for (int i = 0; i < restForms.Count; i++)
             {
                 try { restForms[i].Close(); restForms[i].Dispose(); } catch { }
@@ -2644,6 +3115,8 @@ namespace EyeLite
             {
                 KeyboardGuard.Uninstall();
                 KeyboardGuard.OnSkipKey = null;
+                EndPreview();
+                try { if (previewForm != null) { previewForm.Dispose(); previewForm = null; } } catch { }
                 for (int i = 0; i < restForms.Count; i++)
                 {
                     try { restForms[i].Dispose(); } catch { }
