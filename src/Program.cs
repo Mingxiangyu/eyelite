@@ -99,6 +99,45 @@ namespace EyeLite
         public static readonly Color InputBg = Color.FromArgb(0xF7, 0xF9, 0xFC);       // #F7F9FC
         public static readonly Color InputBorder = Color.FromArgb(0xE4, 0xEA, 0xF2);   // #E4EAF2
 
+        // ---- 共享载体绘制（A1 边缘微光 / A2 压暗层共用一套"光"的观感）----
+        //
+        /// <summary>
+        /// 画一条"从屏幕边缘向内淡出"的渐变带。
+        ///
+        /// 为什么是三档 blend 而不是两档（实色 → 全透明）：
+        ///   两档线性渐变在**中段**就衰减掉一半亮度，视觉上会出现一条能看出来的硬边，
+        ///   像"画了个框"而不像光。三档把亮度压在外侧、留一段长尾缓慢消失，
+        ///   观感才是"屏幕边缘在发光"。
+        ///
+        /// 纪律：只做整条矩形填充，**不建位图、不缓存画刷**（契约 §10.5）。
+        /// </summary>
+        internal static void DrawFadeBand(Graphics g, Rectangle r, Color color,
+                                          LinearGradientMode mode, bool reverse)
+        {
+            if (r.Width <= 0 || r.Height <= 0) return;
+            try
+            {
+                Color outer = Color.FromArgb(color.A, color);
+                Color mid = Color.FromArgb((int)(color.A * 0.34f), color);
+                Color inner = Color.FromArgb(0, color);
+
+                Color[] cols = reverse
+                    ? new Color[] { inner, mid, outer }
+                    : new Color[] { outer, mid, inner };
+
+                using (LinearGradientBrush br = new LinearGradientBrush(r, cols[0], cols[2], mode))
+                {
+                    ColorBlend blend = new ColorBlend(3);
+                    blend.Colors = cols;
+                    // 0.62 而不是 0.5：让"亮"的部分集中在外侧 2/5，内侧是长尾
+                    blend.Positions = new float[] { 0f, 0.62f, 1f };
+                    br.InterpolationColors = blend;
+                    g.FillRectangle(br, r);
+                }
+            }
+            catch { }
+        }
+
         // ---- 共享字体（static readonly，进程内只建一次，永不释放）----
         public static readonly Font FontHint = new Font("微软雅黑", 20f, FontStyle.Regular);      // 遮罩主提示
         public static readonly Font FontTip = new Font("微软雅黑", 11f, FontStyle.Regular);       // 遮罩副提示
@@ -1455,7 +1494,7 @@ namespace EyeLite
     // 呼吸只改整窗 Opacity（0.05 ↔ 0.35，3 秒一个来回），不重画、不缓存任何位图。
     internal class EdgeGlowForm : Form
     {
-        private const int BandDefault = 6;      // 96dpi 下的边带厚度
+        private const int BandDefault = 26;     // 96dpi 下的边带厚度（6 太窄，看不出是光）
 
         private int band = BandDefault;
         private float dpiScale = 1f;
@@ -1572,19 +1611,7 @@ namespace EyeLite
         {
             if (r.Width <= 0 || r.Height <= 0) return;
 
-            Color near = Ui.Accent;
-            Color far = Color.FromArgb(0, Ui.Accent);
-            Color c1 = reverse ? far : near;
-            Color c2 = reverse ? near : far;
-
-            try
-            {
-                using (LinearGradientBrush b = new LinearGradientBrush(r, c1, c2, mode))
-                {
-                    g.FillRectangle(b, r);
-                }
-            }
-            catch { }
+            Ui.DrawFadeBand(g, r, Ui.Accent, mode, reverse);
         }
     }
 
@@ -2246,7 +2273,7 @@ namespace EyeLite
     // 三段结构，刻意拆开：
     //   MoveItem    —— 纯数据（动作名 / 时长 / 要点 / 禁忌关键词），G1 的动作库就是它的数组
     //   MovePose    —— 一帧姿势（10 个标量），G2 的关键帧插值就是在它上面做线性插值
-    //   MoveForm    —— 演示窗（480×420、16ms 帧、火柴人矢量绘制、底部动作名/剩余/进度）
+    //   MoveForm    —— 演示窗（720×640、16ms 帧、火柴人矢量绘制、底部动作名/剩余/进度）
     //
     // 为什么火柴人用"标量姿势 + 前向运动学"而不是逐帧画死点位：
     //   逐帧画死 = 换一个动作就要重画一套坐标，且不同 DPI 下全要重算；
@@ -2429,7 +2456,7 @@ namespace EyeLite
     }
 
     /// <summary>
-    /// G2 演示窗：480×420，居中主屏，永不抢焦点。
+    /// G2 演示窗：720×640，居中主屏，永不抢焦点。
     /// 一个动作做完自动切下一个；休息结束由插件调 Hide() 关闭并 Dispose。
     /// </summary>
     internal class MoveForm : Form
@@ -2463,8 +2490,8 @@ namespace EyeLite
             this.DoubleBuffered = true;
             this.Font = Ui.FontUi;
 
-            int w = Sc(480);
-            int h = Sc(420);
+            int w = Sc(720);
+            int h = Sc(640);
             this.Size = new Size(w, h);
             CenterOnPrimary(w, h);
 
@@ -2608,12 +2635,12 @@ namespace EyeLite
             if (leftAllSec < 0) leftAllSec = 0;
 
             TextRenderer.DrawText(g, "还剩 " + leftAllSec + " 秒", Ui.FontEyebrow,
-                new Rectangle(0, Sc(356), w, Sc(18)), Ui.RingLabel,
+                new Rectangle(0, Sc(590), w, Sc(18)), Ui.RingLabel,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
 
             int barW = w - Sc(80);
             int barX = Sc(40);
-            int barY = Sc(380);
+            int barY = Sc(612);
             int barH = Math.Max(2, Sc(3));
             using (SolidBrush track = new SolidBrush(Ui.RingTrack))
             {
@@ -2690,13 +2717,13 @@ namespace EyeLite
         private void DrawFigure(Graphics g, MovePose p, int w)
         {
             int cx = w / 2;
-            int groundY = Sc(316);
-            int lenTorso = Sc(50);
-            int lenArm = Sc(36);
-            int lenFore = Sc(32);
-            int lenThigh = Sc(46);
-            int lenShin = Sc(46);
-            int headR = Sc(15);
+            int groundY = Sc(512);
+            int lenTorso = Sc(78);
+            int lenArm = Sc(56);
+            int lenFore = Sc(48);
+            int lenThigh = Sc(70);
+            int lenShin = Sc(70);
+            int headR = Sc(22);
 
             // 下蹲：髋往下沉、膝盖往前顶。用两条腿的关节角度表达会更"真"，
             // 但对火柴人来说"髋高 + 膝点偏移"就足够读懂，且不会算错。
@@ -4283,7 +4310,7 @@ namespace EyeLite
         // 恰好形成"轻微暗 → 只是有点暖边；接近到点 → 边缘明显发光"的渐进暗示。
         //
         // 静态图案，只在首次绘制时画一次：不缓存位图、不建 Timer、不重绘路径。
-        private const int GlowBandDefault = 5;      // 96dpi 下的光带厚度
+        private const int GlowBandDefault = 18;     // 96dpi 下的光带厚度（与 A1 同一观感）
 
         private float dpiScale = 1f;
         private double lastAlpha = 0.0;             // 当前档位（决定要不要画右下角小字）
@@ -4327,19 +4354,8 @@ namespace EyeLite
         {
             if (r.Width <= 0 || r.Height <= 0) return;
 
-            Color near = Ui.Accent;                       // 外侧：不透明
-            Color far = Color.FromArgb(0, Ui.Accent);     // 内侧：全透明
-            Color c1 = reverse ? far : near;
-            Color c2 = reverse ? near : far;
-
-            try
-            {
-                using (LinearGradientBrush b = new LinearGradientBrush(r, c1, c2, mode))
-                {
-                    g.FillRectangle(b, r);
-                }
-            }
-            catch { }
+            // 与 A1 共用同一套边缘发光观感（三档 blend，不是两档硬渐变）
+            Ui.DrawFadeBand(g, r, Ui.Accent, mode, reverse);
         }
 
         /// <summary>

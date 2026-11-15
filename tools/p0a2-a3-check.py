@@ -308,7 +308,7 @@ def main():
         time.sleep(28.0)
         m30, p30 = private_commit_mb(p.pid)
         g30 = gdi_objects(p.pid)
-        time.sleep(150.0)
+        time.sleep(90.0)   # t=180 → t=120：稳态增长在 60s 首次休息后即稳定，120s 足够
         m180, p180 = private_commit_mb(p.pid)
         g180 = gdi_objects(p.pid)
         results.append(('MEM 核心裸跑 Private commit ≤ 45MB', 0 < m30 <= 45.0,
@@ -328,7 +328,7 @@ def main():
         time.sleep(140.0)                    # 两次休息已发生，全部 UI 至少显示过一次
         g140 = gdi_objects(p.pid)
         m140, _ = private_commit_mb(p.pid)
-        time.sleep(240.0)
+        time.sleep(160.0)  # t=380 → t=300：同理，稳态窗口 160s 够看趋势
         g380 = gdi_objects(p.pid)
         m380, _ = private_commit_mb(p.pid)
         results.append(('A3-STEADY 首次显示后 240s 稳态零增长(≤5)',

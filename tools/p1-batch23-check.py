@@ -6,7 +6,7 @@ P1 批 2/3 验收脚本：Movement(G1/G2/G11) / E1 跳过配额 / E6 锁前倒�
 ## 先说三条"读源码后才知道"的硬约束（不遵守就会得到一堆假 FAIL）
 
 1. **演示窗只挂在 bodyBreak 上**（Program.cs:6352 `if (bodyBreak) { ShowMovementForRest(...); ... }`）。
-   普通护眼休息（到点弹的那种）**永远没有** 480×420 / 320×360 小窗 —— 这是刻意的设计
+   普通护眼休息（到点弹的那种）**永远没有** 720×640 / 320×360 小窗 —— 这是刻意的设计
    （注释原文：护眼休息时在屏幕正中弹一个会动的窗，等于把视线钉回屏幕上）。
 2. **bodyBreak 只能由久坐时钟触发**，`sedLimitMs = SedentaryMinutes * 60s`（Program.cs:5323），
    而 `SedentaryMinutes` 的钳制范围是 **15~180**（Program.cs:3109）→ 自然等待最短也要 15 分钟。
@@ -32,20 +32,20 @@ P1 批 2/3 验收脚本：Movement(G1/G2/G11) / E1 跳过配额 / E6 锁前倒�
 ### Movement（插件 Plugin_Movement）
 配置：`SedentaryEnabled=1, SedentaryMinutes=15, SedentarySeconds=20, WorkMinutes=20`
       + 环境变量 `EYE_LITE_FAKE_SED_MS=900000`（久坐累积钉到 15 分钟 → bodyBreak 立即到点）
-  · **G1** `MovementContraindications=""` → 遮罩出现后应出现 **480×420**（允许 ±6px DPI 误差）
+  · **G1** `MovementContraindications=""` → 遮罩出现后应出现 **720×640**（允许 ±6px DPI 误差）
     的窗口；子窗口/标题为空是正常的（MoveForm 全部自绘，见 2606 行），所以判据只认尺寸+属性。
-  · **G2 动画**：对 480×420 窗口客户区**连抓 3 帧、间隔 0.8s**，判据分三档：
+  · **G2 动画**：对 720×640 窗口客户区**连抓 3 帧、间隔 0.8s**，判据分三档：
       - 任意两帧指纹不同 → 画面在动 → PASS
       - 三帧全同 → 才判 FAIL（先排除"两次抓的是同一帧"：MoveForm 是 16ms 帧，
         间隔 0.8s 抓 3 次仍全同，说明定时器真的没在跑）
       - 三种抓图方式全失败 → SKIP（判"仪器不成立"），**不**用"文本不同"冒充动画
         （MoveForm 没有子控件，文本法本来就不成立）
   · **G11**（本批最重要）：
-      - `=""` → 有 480×420（6 个动作全可用）
-      - `="腰椎"` → **仍有** 480×420（还剩 3 个动作）
-      - `="腰椎;脊柱;膝;髋;颈椎;肩袖;肩;腕;腱鞘;腕管"` → **没有** 480×420，但**遮罩必须正常**
+      - `=""` → 有 720×640（6 个动作全可用）
+      - `="腰椎"` → **仍有** 720×640（还剩 3 个动作）
+      - `="腰椎;脊柱;膝;髋;颈椎;肩袖;肩;腕;腱鞘;腕管"` → **没有** 720×640，但**遮罩必须正常**
         （全部动作被排除 = 安静休息，且不能退回去弹 Ritual）
-      - 对照：`Plugin_Movement=0` → 没有 480×420（**必跑**，见下）
+      - 对照：`Plugin_Movement=0` → 没有 720×640（**必跑**，见下）
     > **为什么 `movementctl` 不能省**：`=""` 与"全部排除"是同一二进制、同一配置、
     > 只差一行禁忌词的组内对照 —— 这能证明"禁忌过滤生效"，但证明不了"没有窗口"
     > 是因为过滤而**不是插件根本没工作**。所以 `Plugin_Movement=0` 这条对照必跑
@@ -713,8 +713,8 @@ BODY_BREAK_TIMEOUT = 150          # 有钩子时几秒就到；150s 没来 = 钩
 
 def case_movement(base_orig, results, plugin_on=True, contra='', label='G1/G2',
                   expect_window=True):
-    """跑一次 bodyBreak，判定 480×420 演示窗是否出现（并在出现时验动画）。"""
-    print('\n--- Movement %s：contraindications=%r 期望 %s480×420 ---'
+    """跑一次 bodyBreak，判定 720×640 演示窗是否出现（并在出现时验动画）。"""
+    print('\n--- Movement %s：contraindications=%r 期望 %s720×640 ---'
           % (label, contra, '' if expect_window else '**没有**'))
     if not stop_eyelite():
         results.append(('Movement %s' % label, False, 'EyeLite 实例停不下来'))
@@ -743,14 +743,14 @@ def case_movement(base_orig, results, plugin_on=True, contra='', label='G1/G2',
         return
     print('  遮罩 %.0fs 出现（有钩子时应在 1~3s）' % t_ov)
 
-    hit, wins = wait_pred(lambda: find_by_size(480, 420) or None, 6.0)
+    hit, wins = wait_pred(lambda: find_by_size(720, 640) or None, 6.0)
     kids_txt = []
     anim = 'n/a'
     hashes = []
     if wins:
         hwnd = wins[0][0]
         kids_txt = child_texts(hwnd)
-        print('  480×420 窗口：%s  子窗口文本=%s' % (describe(hwnd), kids_txt))
+        print('  720×640 窗口：%s  子窗口文本=%s' % (describe(hwnd), kids_txt))
         # 连抓 3 帧、间隔 0.8s：两帧相同不足以判"没动"（可能恰好在同一帧边界），
         # 三帧全同才判 FAIL。MoveForm 是 16ms 帧，0.8s 间隔抓 3 次仍全同 = 定时器没跑。
         cap_fail = None
@@ -770,11 +770,11 @@ def case_movement(base_orig, results, plugin_on=True, contra='', label='G1/G2',
             print('  抓图 3 帧：%s → 不同指纹 %d 个 → %s'
                   % ([h[:8] for _m, h in hashes], uniq, anim))
     else:
-        print('  6s 内没有 480×420 窗口')
+        print('  6s 内没有 720×640 窗口')
 
     if expect_window:
         ok = bool(wins)
-        detail = ('遮罩 %.0fs；480×420=%s；动画=%s；动作名文本=%s'
+        detail = ('遮罩 %.0fs；720×640=%s；动画=%s；动作名文本=%s'
                   % (t_ov, '有' if wins else '无', anim, kids_txt))
         results.append(('Movement %s' % label, ok, detail))
         # G2 单独一条（仅当窗口在时才判定，抓图失败判 SKIP）
@@ -793,7 +793,7 @@ def case_movement(base_orig, results, plugin_on=True, contra='', label='G1/G2',
     else:
         ok = (not wins) and bool(overlay_windows())
         results.append(('Movement %s' % label, ok,
-                        '遮罩 %.0fs 正常；480×420=%s（期望无）'
+                        '遮罩 %.0fs 正常；720×640=%s（期望无）'
                         % (t_ov, '有' if wins else '无')))
 
 

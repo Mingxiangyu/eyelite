@@ -141,6 +141,24 @@ def main():
         return 2
 
     filters = sys.argv[1:]
+
+    # ---- 两档 profile ----
+    #
+    # 全量（不加参数）≈ 20~35 分钟，其中有 15 分钟是**真实的等待**（p0a 的 3×60s、
+    # p0a2 的 MEM/GDI 稳态、p0d 的空闲判定），这段时间屏幕会被全屏遮罩占住，
+    # 人没法用电脑。所以分成两档：
+    #
+    #   fast  ≈ 4 分钟：只跑"判据是布尔、且能用钩子压到几秒"的三项
+    #                    （严格档吞键 / 闸门 / 抑制），改动后每轮都能跑
+    #   all   ≈ 20~35 分钟：含所有时间语义用例，发布前跑一次，最好在人离开时跑
+    #
+    # 什么时候必须跑 all：碰了计时、预告窗口、空闲判定、遮罩生命周期、E6 倒计时。
+    # 什么时候 fast 够：只改了配色/尺寸/文案/插件内部绘制。
+    if 'fast' in filters:
+        filters = ['p0e', 'p0c-gate', 'p0c-suppress']
+        print('>> profile = fast（约 4 分钟，仅布尔判据的三项）')
+    elif not filters:
+        print('>> profile = all（含真实等待，约 20~35 分钟；建议人离开时跑）')
     exe_md5 = md5(EXE)
     exe_size = os.path.getsize(EXE)
     src_size = os.path.getsize(SRC)
