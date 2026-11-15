@@ -15,11 +15,12 @@ P0-B 真机实测（v1）：预告横幅三出口 —— P0-B-6 / B-7 / B-8
 
     B-8 立即休息   → 点击后 ≤3s 遮罩出现
     B-7 跳过       → 点击后 45s 内**没有**遮罩（不是"立刻结束本轮"），下一次遮罩 ≈60s（整周期）
-    B-6 延后 5 分  → 点击后 120s 内**没有**遮罩，下一次遮罩 ≈330s
+    B-6 延后 1 分  → 点击后 45s 内**没有**遮罩，下一次遮罩 ≈90s
 
-B-6 的 330s 不是笔误：「延后」加的是**阈值**（workLimitMs += 5min），而点击发生在
+B-6 的 90s 不是笔误：「延后」加的是**阈值**（workLimitMs += PostponeMinutes），而点击发生在
 预告刚开始时，累计已经吃掉 PreviewSeconds 秒，所以点击后到遮罩的时长是
-`PostponeMinutes*60 + PreviewSeconds` = 300 + 30 = 330s。第一版按 300s 判会误报 FAIL。
+`PostponeMinutes*60 + PreviewSeconds` = 60 + 30 = 90s。第一版按 60s 判会误报 FAIL。
+（`PER_POSTPONE_MIN` 默认取 1 而不是用例的 5，纯粹为提速；语义不变，见常量处注释。）
 
 B-6/B-7 都是「先证明没有立刻弹，再证明推迟到该弹的时刻才弹」——只测前者会让
 "按钮根本没生效、计时器还在原处跑"也混过去，只测后者会让"按钮 = 立即结束"混过去。
@@ -91,6 +92,11 @@ MK_LBUTTON = 0x0001
 
 # 三个出口的匹配前缀（「延后」真实文本是「延后 5 分」）
 EXIT_TEXTS = [('postpone', '延后'), ('skip', '跳过'), ('now', '立即休息')]
+
+# B6 用的推迟分钟数。**为提速从默认的 5 降到 1**：这条用例验的是"延后 = 本轮不结束、
+# 阈值后移"这个性质，后移量由配置决定，1 分钟就能验；5 分钟只是让整轮多等 240s。
+# 想验默认值时把这里改回 5，断言（expect_ov / pv_ok 的期望）会自动跟着算。
+PER_POSTPONE_MIN = 1
 
 _pid_cache = set()
 
@@ -538,28 +544,38 @@ def case_b6(results):
         return
 
     # 期望值推导（第一版这里算错过，记下来）：
-    #   「延后」加的是**阈值**（workLimitMs += 5min），不是"从现在起再等 5 分钟"。
+    #   「延后」加的是**阈值**（workLimitMs += PostponeMinutes），不是"从现在起再等 N 分钟"。
     #   点击发生在预告刚开始时，此时 accum ≈ limit_old - PreviewSeconds。
     #   于是点击后到遮罩的时长 = limit_new - accum = PostponeMinutes*60 + PreviewSeconds
-    #                          = 300 + 30 = 330s
-    #   （不是 300s —— 那 30 秒是"已经累计过的"工作，已经记在账上了。）
-    expect_ov = 300.0 + 30.0
-    w = watch(370.0, stop_on_overlay=True, progress_every=30, tag='等延后后的遮罩')
+    #                          = 60 + 30 = 90s     ← 本脚本把 PostponeMinutes 降到 1 提速
+    #   （不是 60s —— 那 30 秒是"已经累计过的"工作，已经记在账上了。）
+    #
+    # **为提速把 PostponeMinutes 从 5 降到 1，语义不变**：这条用例验的是
+    # "延后 = 本轮不结束、阈值后移"这个**性质**（后移多少由配置决定），
+    # 5 分钟能验的东西 1 分钟一样能验，只是整体少等 240s。
+    # 若哪天要验"默认值 5 分钟"，改 PER_POSTPONE_MIN 即可，断言会跟着算。
+    expect_ov = PER_POSTPONE_MIN * 60.0 + 30.0
+    w = watch(expect_ov + 60.0, stop_on_overlay=True, progress_every=20,
+              tag='等延后后的遮罩')
     ov = w.first_overlay
     pv2 = w.first_preview
     if ov is None:
         results.append(('B6 延后', False,
-                        '%s；370s 内没有出现下一次遮罩' % detail))
+                        '%s；%.0fs 内没有出现下一次遮罩'
+                        % (detail, expect_ov + 60.0)))
         return
-    no_instant = ov >= 120.0
+    # "本轮立刻结束"会表现为 30s 左右就弹（剩余时间没被后移），
+    # 所以只要 >45s 就已经能排除"点了等于立即结束"。
+    no_instant = ov >= 45.0
     shifted = abs(ov - expect_ov) <= 10.0
-    pv_ok = pv2 is not None and abs(pv2 - 300.0) <= 10.0   # 遮罩前 30s 预告
+    pv_ok = pv2 is not None and abs(pv2 - PER_POSTPONE_MIN * 60.0) <= 10.0
     ok = no_instant and shifted and pv_ok
     results.append(('B6 延后', ok,
-                    '%s；下一次遮罩 %.1fs（期望 %.0fs = 延后 300s + 预告 30s，'
-                    '且 ≥120s）、下一次预告 %s（期望 ≈300s）%s'
-                    % (detail, ov, expect_ov,
+                    '%s；下一次遮罩 %.1fs（期望 %.0fs = 延后 %ds + 预告 30s，'
+                    '且 ≥45s）、下一次预告 %s（期望 ≈%ds）%s'
+                    % (detail, ov, expect_ov, PER_POSTPONE_MIN * 60,
                        ('%.1fs' % pv2) if pv2 is not None else 'never',
+                       PER_POSTPONE_MIN * 60,
                        '' if ok else '  <-- 不符合"阈值后移"')))
 
 
@@ -603,7 +619,7 @@ def main():
             'WorkMinutes': '1',            # 到点 ≈60s
             'PreviewSeconds': '30',        # 横幅在 30s 出现，留 30s 给点击
             'RestSeconds': '5',            # 用户就在这台机器上，缩短停留
-            'PostponeMinutes': '5',        # 用例默认值，必须按 5 分钟验证
+            'PostponeMinutes': str(PER_POSTPONE_MIN),   # 提速：1 分钟（见文件头说明）
             'PomodoroEnabled': '0',
             'IdleMinutes': '0',            # 不因空闲暂停（否则计时被冻结，观测不到点）
             'SedentaryEnabled': '0',

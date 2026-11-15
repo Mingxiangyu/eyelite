@@ -5200,6 +5200,55 @@ namespace EyeLite
             catch { return ""; }
         }
 
+        // ================================================================
+        // 测试钩子：一次性"预置累加器"（EYE_LITE_FAKE_SED_MS / EYE_LITE_FAKE_WORK_MS）
+        // ================================================================
+        //
+        // **这是测试设施，不是功能开关。生产环境禁设；不设则整条路径与现在完全一致**
+        // （不设 → 值是 -1 → OnTick 里那一行 if 不成立 → 一个字节都不参与）。
+        // 与契约 §10.6「诊断/测试设施不得改变默认行为」同一口径。
+        //
+        // 为什么需要：久坐间隔被钳在 15~180 分钟、工作周期按分钟计，而 bodyBreak 与
+        // 到点路径都必须真跑一遍。没有钩子时一轮验收要 80 分钟，有了它 <10 分钟 ——
+        // 我们已经在 D-3（休眠）上吃过"验不动只能做源码审查"的亏。
+        //
+        // **语义是"一次性消耗"，不是"钉住"**（这条被改过一次，别改回去）：
+        //   生效一个 tick 后立刻置回 -1，之后就完全走真实累加。
+        //   钉住的话每轮休息结束（ResetWork 清零累加器）后会被立刻重新钉满 →
+        //   下一 tick 又到点 → 休息之间零间隔地连弹，测试没法区分"第二轮"和"死循环"。
+        //   一次性消耗既能让第一轮立刻到，又保留"下一轮要等真实时长"这个真实语义。
+        //
+        // 两者互不干扰：sed 的只写 sedAccumMs，work 的只写 workAccumMs。
+        // 都不在 ResetWork() 里重新武装 —— 一次性就是一次性。
+        // 都不提供 _FILE 版本：这批不需要运行期改，多一个钩子就多一处长期负担。
+        private static long fakeSedPending = ReadFakeSedMs();
+        private static long fakeWorkPending = ReadFakeWorkMs();
+
+        private static long ReadFakeSedMs()
+        {
+            return ReadFakeAccumMs("EYE_LITE_FAKE_SED_MS");
+        }
+
+        private static long ReadFakeWorkMs()
+        {
+            return ReadFakeAccumMs("EYE_LITE_FAKE_WORK_MS");
+        }
+
+        /// <summary>两个钩子共用的解析：未设 / 空 / 非法 / 负数 一律 -1（= 不生效）。</summary>
+        private static long ReadFakeAccumMs(string variable)
+        {
+            try
+            {
+                string s = Environment.GetEnvironmentVariable(variable);
+                if (string.IsNullOrEmpty(s)) return -1;
+                long v;
+                if (!long.TryParse(s, out v)) return -1;
+                if (v < 0) return -1;
+                return v;
+            }
+            catch { return -1; }
+        }
+
         /// <summary>读文件钩子当前的空闲毫秒；没设路径 / 文件不在 / 内容非法一律返回 -1（= 不生效）。</summary>
         private static long ReadFakeIdleFromFile()
         {
@@ -5498,6 +5547,20 @@ namespace EyeLite
                     {
                         workAccumMs += dt;
                         if (cfg.SedentaryEnabled) sedAccumMs += dt;
+                    }
+
+                    // 测试钩子：两个"一次性预置"都在 due 判定**之前**执行，生效一个 tick 后自动失效。
+                    // 未设时两个值都是 -1，这两行 if 都不成立 —— 与之前逐字节一致。
+                    // 互不干扰：sed 的只写 sedAccumMs，work 的只写 workAccumMs。
+                    if (fakeSedPending >= 0)
+                    {
+                        sedAccumMs = fakeSedPending;
+                        fakeSedPending = -1;
+                    }
+                    if (fakeWorkPending >= 0)
+                    {
+                        workAccumMs = fakeWorkPending;
+                        fakeWorkPending = -1;
                     }
 
                     // 久坐优先：久坐到点时护眼可能还剩一半，
