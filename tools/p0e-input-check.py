@@ -408,6 +408,11 @@ def main():
             # ================= 严格档对照组 =================
             strict = dict(base)
             strict['StrictMode'] = '1'
+            # E6（锁前倒计时）之后，严格模式**不再是一出现就装钩子**：
+            # 默认会在休息开始时先给 N 秒自由时间。本用例要验的是"装了钩子之后确实吞键"，
+            # 所以必须显式把倒计时设为 0，否则注入落在倒计时窗口内 → 键被放行，
+            # 看起来像"严格模式没生效"，实际是测试前提过时了（曾因此误判过一次）。
+            strict['LockCountdownSeconds'] = '0'
             write_cfg(strict)
             subprocess.Popen([EXE], stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)

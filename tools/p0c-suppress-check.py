@@ -610,7 +610,11 @@ def case_c7(results, base):
         results.append(('C7 抑制期不吞键', False, 'EyeLite 实例停不下来'))
         return False
     cfg = dict(base)
-    cfg.update({'PreviewSeconds': '30', 'StrictMode': '1'})
+    cfg.update({'PreviewSeconds': '30', 'StrictMode': '1',
+                # E6 之后严格模式会先给 N 秒自由时间；本用例要验的是
+                # '装了钩子之后确实吞键'，所以必须把倒计时设为 0，
+                # 否则注入落在倒计时窗口内会被放行，看起来像产品没吞键。
+                'LockCountdownSeconds': '0'})
     write_cfg(cfg)
     launch(quns=4)
     tl = Timeline()
@@ -671,7 +675,11 @@ def case_control(results, base):
     # 必须自己写配置：TC 跑在所有用例之前，此时 config.ini 还是用户原值
     # （WorkMinutes=20），不写就会等 20 分钟才出遮罩。
     cfg = dict(base)
-    cfg.update({'PreviewSeconds': '30', 'StrictMode': '1'})
+    cfg.update({'PreviewSeconds': '30', 'StrictMode': '1',
+                # E6 之后严格模式会先给 N 秒自由时间；本用例要验的是
+                # '装了钩子之后确实吞键'，所以必须把倒计时设为 0，
+                # 否则注入落在倒计时窗口内会被放行，看起来像产品没吞键。
+                'LockCountdownSeconds': '0'})
     write_cfg(cfg)
     launch(quns=0)
     t = wait_overlay(110.0)
