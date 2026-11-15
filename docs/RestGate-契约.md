@@ -610,6 +610,7 @@ static System.Reflection.Assembly ResolveHost(object sender, ResolveEventArgs ar
 | `EYE_LITE_FAKE_IDLE_FILE` | 指向文件，**每次取空闲重读**，用于验证"离开后回来"的时序 | ✅ |
 | `EYE_LITE_FAKE_SED_MS` | 把"久坐累计毫秒"**钉成**该值（在 `sedDue` 求值前赋值）。用于免等 15 分钟验证 `bodyBreak` 路径 | ❌ 静态只读 |
 | `EYE_LITE_TRACE_FILE` | 追加记录 `BEGIN <ISO> <dueMs> <fireMs> <lateMs>` / `END <ISO> <durationMs>`，用于把"计时准确但窗口晚"与"计时本身晚"二分 | ✅ 追加写 |
+| `EYE_LITE_OPEN_SETTINGS` | `=1` 时启动即打开设置页。本程序没有"二次启动打开设置"的行为（第二次启动只弹提示框），托盘图标在 Win11 可能被折叠，这是验证设置页版面的唯一稳定入口 | ❌ 静态只读 |
 
 三条约束：
 1. 读失败 / 内容非法 / 文件不存在 → **一律回退到真实行为**，绝不抛异常、绝不 fail-closed。
