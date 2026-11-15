@@ -2440,7 +2440,7 @@ namespace EyeLite
     internal static class MoveLib
     {
         /// <summary>
-        /// 6 个动作。每条的关键帧都只覆盖**一个循环**，窗口按 CycleSeconds 反复播，
+        /// 7 个动作。每条的关键帧都只覆盖**一个循环**，窗口按 CycleSeconds 反复播，
         /// 所以「深蹲 10 次」是真的 10 次（30 秒 / 3 秒一次），不是画个样子。
         /// </summary>
         public static List<MoveItem> Build()
@@ -2516,6 +2516,19 @@ namespace EyeLite
                     new MovePose(0.50, 0, 88, -88, 0, 0, 0, 0, 0, 0),
                     new MovePose(0.75, 0, 88, -88, -18, 18, 0, 0, 0, 0),
                     new MovePose(1.00, 0, 88, -88, 0, 0, 0, 0, 0, 0)
+                }));
+
+            // 7) 颈部放松：头左右缓慢侧屈（不是转圈 —— 绕环对颈椎不稳的人不友好）。
+            //    5 秒一个来回：慢才安全，快就是甩脖子。
+            list.Add(new MoveItem("颈部放松", 20, 5, "耳朵慢慢靠向肩膀，别转圈，别耸肩",
+                new string[] { "颈椎" },
+                new MovePose[]
+                {
+                    new MovePose(0.00, 0, 8, -8, 0, 0, 0, 0, 0, 0),
+                    new MovePose(0.25, -1.5, 8, -8, 0, 0, 0, 0, 0, -0.9),   // 向左
+                    new MovePose(0.50, 0, 8, -8, 0, 0, 0, 0, 0, 0),
+                    new MovePose(0.75, 1.5, 8, -8, 0, 0, 0, 0, 0, 0.9),     // 向右
+                    new MovePose(1.00, 0, 8, -8, 0, 0, 0, 0, 0, 0)
                 }));
 
             return list;
