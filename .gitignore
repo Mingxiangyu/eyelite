@@ -18,3 +18,6 @@ Thumbs.db
 
 # 本机推送配置（不含敏感信息也不该进仓库）
 .github-push.json
+
+# 打包产物：可重新生成，不入库
+dist/

@@ -244,7 +244,7 @@ namespace EyeLite
         private static extern int GetDeviceCaps(IntPtr hdc, int index);
 
         /// <summary>设置面板上显示的版本号；发布时与 git tag 同步，只改这一处。</summary>
-        public const string AppVersion = "v1.2.0";
+        public const string AppVersion = "v1.4.0";
 
         /// <summary>圆角矩形路径。调用方负责 Dispose。</summary>
         public static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -2599,7 +2599,7 @@ namespace EyeLite
     internal static class MoveLib
     {
         /// <summary>
-        /// 7 个动作。每条的关键帧都只覆盖**一个循环**，窗口按 CycleSeconds 反复播，
+        /// 9 个动作。每条的关键帧都只覆盖**一个循环**，窗口按 CycleSeconds 反复播，
         /// 所以「深蹲 10 次」是真的 10 次（30 秒 / 3 秒一次），不是画个样子。
         /// </summary>
         public static List<MoveItem> Build()
@@ -2688,6 +2688,31 @@ namespace EyeLite
                     new MovePose(0.50, 0, 8, -8, 0, 0, 0, 0, 0, 0),
                     new MovePose(0.75, 1.5, 8, -8, 0, 0, 0, 0, 0, 0.9),     // 向右
                     new MovePose(1.00, 0, 8, -8, 0, 0, 0, 0, 0, 0)
+                }));
+
+            // 8) 肩胛后缩：**坐姿就能做**，专门给"不想站起来"的那一轮。
+            //    动作很小（只有前臂向后、胸口轻开），所以时长压短、节奏放慢，
+            //    否则看起来像"没在动"。
+            list.Add(new MoveItem("肩胛后缩", 20, 4, "坐着就行：把两侧肩胛骨向后夹，别耸肩",
+                new string[] { "肩", "肩袖" },
+                new MovePose[]
+                {
+                    new MovePose(0.00, 0, 12, -12, 0, 0, 0, 0, 0, 0),
+                    new MovePose(0.45, -3, 16, -16, -34, 34, 0, 0, 0, 0),   // 夹到最紧
+                    new MovePose(0.60, -3, 16, -16, -34, 34, 0, 0, 0, 0),   // 停一拍
+                    new MovePose(1.00, 0, 12, -12, 0, 0, 0, 0, 0, 0)
+                }));
+
+            // 9) 扩胸：双臂后展 + 躯干轻伸。坐姿站姿都能做，幅度比肩胛后缩大。
+            //    肩部有问题的人做后展会不适，所以禁忌词覆盖肩与肩袖。
+            list.Add(new MoveItem("扩胸", 20, 5, "双臂向后打开，胸口往前送，别仰头",
+                new string[] { "肩", "肩袖" },
+                new MovePose[]
+                {
+                    new MovePose(0.00, 0, 10, -10, 0, 0, 0, 0, 0, 0),
+                    new MovePose(0.35, -6, 42, -42, -18, 18, 0, 0, 0, 0),   // 展开
+                    new MovePose(0.70, -7, 46, -46, -20, 20, 0, 0, 0, 0),   // 再开一点
+                    new MovePose(1.00, 0, 10, -10, 0, 0, 0, 0, 0, 0)
                 }));
 
             return list;
