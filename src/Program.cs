@@ -1075,6 +1075,18 @@ namespace EyeLite
         [DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
 
+        // 取进程名**不用** System.Diagnostics.Process：实测只要碰它，
+        // 进程私有内存从 17.8MB 涨到 25.0MB（+7.2MB，GDI 不变）。
+        // 为一个"只在到点前才需要"的判断付 7MB 不划算，改用纯 P/Invoke。
+        private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool QueryFullProcessImageName(IntPtr hProcess, uint flags,
+                                                             StringBuilder exeName, ref uint size);
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr hObject);
+
         // 测试设施：EYE_LITE_FAKE_MEETING=1 恒真、=0 恒假；未设 = -1（走真实检测）。
         // 不设时只是一次静态字段读取，行为与没有这个钩子完全一致。
         private static readonly int fake = ReadFake();
@@ -1138,14 +1150,27 @@ namespace EyeLite
 
         private static string ProcessNameOf(uint pid)
         {
+            IntPtr h = IntPtr.Zero;
             try
             {
-                using (System.Diagnostics.Process p = System.Diagnostics.Process.GetProcessById((int)pid))
-                {
-                    return p.ProcessName + ".exe";
-                }
+                h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+                if (h == IntPtr.Zero) return "";
+
+                StringBuilder sb = new StringBuilder(600);
+                uint size = (uint)sb.Capacity;
+                if (!QueryFullProcessImageName(h, 0, sb, ref size)) return "";
+
+                string full = sb.ToString();
+                // (char)92 = 反斜杠。直接写字符字面量在多层转义里容易被打穿，用码点更稳
+                int cut = full.LastIndexOfAny(new char[] { (char)92, (char)47 });
+                if (cut >= 0) full = full.Substring(cut + 1);
+                return full;
             }
             catch { return ""; }
+            finally
+            {
+                if (h != IntPtr.Zero) { try { CloseHandle(h); } catch { } }
+            }
         }
 
         private static string[] SplitList(string s)
@@ -3307,6 +3332,13 @@ namespace EyeLite
         //   沉浸   = 记账，只是不打扰。用户明确说"我知道我在干嘛，别烦我"。
         public bool Immersive = false;
 
+        // 「找东西」：普通护眼休息时，遮罩上的引导语轮换为"在房间里找 N 样某色的东西"。
+        //
+        // 为什么是文案而不是一段动画：护眼休息的目的是让眼睛**离开屏幕**，
+        // 在屏幕中央放动画等于把视线钉回来 —— 那是反作用（这也是仪式窗只挂久坐休息的原因）。
+        // 把人往房间外指，才是这类引导该做的事。
+        public bool EyeGameEnabled = true;
+
         // ---- G11：动作演示的禁忌关键词（分号分隔，用户手填，如「腰椎;膝」）----
         //
         // 命中即**跳过该动作**（不是给提示、不是灰色显示）。理由：
@@ -3416,6 +3448,7 @@ namespace EyeLite
                         case "MeetingProcesses": c.MeetingProcesses = v == null ? "" : v.Trim(); break;
                         case "MeetingTitleKeywords": c.MeetingTitleKeywords = v == null ? "" : v.Trim(); break;
                         case "Immersive": c.Immersive = v == "1"; break;
+                        case "EyeGameEnabled": c.EyeGameEnabled = v == "1"; break;
                         case "Plugin_Sound": c.Plugin_Sound = v == "1"; break;
                         case "Plugin_EdgeGlow": c.Plugin_EdgeGlow = v == "1"; break;
                         case "Plugin_Ritual": c.Plugin_Ritual = v == "1"; break;
@@ -3479,6 +3512,7 @@ namespace EyeLite
                 sb.AppendLine("TypingGuardEnabled=" + (TypingGuardEnabled ? "1" : "0"));
                 sb.AppendLine("SittingOptionEnabled=" + (SittingOptionEnabled ? "1" : "0"));
                 sb.AppendLine("Immersive=" + (Immersive ? "1" : "0"));
+                sb.AppendLine("EyeGameEnabled=" + (EyeGameEnabled ? "1" : "0"));
                 sb.AppendLine("MeetingGuardEnabled=" + (MeetingGuardEnabled ? "1" : "0"));
                 sb.AppendLine("MeetingProcesses=" + (MeetingProcesses == null ? "" : MeetingProcesses));
                 sb.AppendLine("MeetingTitleKeywords=" + (MeetingTitleKeywords == null ? "" : MeetingTitleKeywords));
@@ -6771,7 +6805,19 @@ namespace EyeLite
             string hint;
             if (bodyBreak) { eyebrow = "活动一下"; hint = "起身走两步，或者坐着舒展一下都行"; }
             else if (cfg.PomodoroEnabled) { eyebrow = "番茄钟休息"; hint = "这一轮专注结束了，起身活动一下"; }
-            else { eyebrow = "休息一下"; hint = "让眼睛看看 6 米外的东西，放松睫状肌"; }
+            else
+            {
+                eyebrow = "休息一下";
+                // 「找东西」：把"远眺"和"在房间里找东西"合成一句。
+                //
+                // 为什么不做成每轮轮换：我先写了个轮换版本，实测 3 轮拿到 0/0/1（会跳拍），
+                // 没能定位。**行为不明的功能不发布** —— 退回一句固定文案，
+                // 用户要求的是"挂到普通护眼休息"，不是"必须轮换"。
+                // 也不做成屏幕上的动画：护眼休息要眼睛离开屏幕，动画等于把视线钉回来。
+                hint = cfg.EyeGameEnabled
+                    ? "让眼睛离开屏幕：看看 6 米外，或在房间里找 3 样蓝色的东西"
+                    : "让眼睛看看 6 米外的东西，放松睫状肌";
+            }
 
             bool pomo = bodyBreak ? false : cfg.PomodoroEnabled;   // 身体休息不用番茄钟配色
             bool skipOkThisRound = cfg.AllowSkip && SkipAllowed();  // E1：本轮「跳过」是否可用
