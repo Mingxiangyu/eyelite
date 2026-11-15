@@ -15,6 +15,9 @@ P1 批 2/3 验收脚本：Movement(G1/G2/G11) / E1 跳过配额 / E6 锁前倒�
    为测试加了钩子 `EYE_LITE_FAKE_SED_MS`（静态、启动读一次、"久坐累计毫秒"钉成给定值，
    在 sedDue 计算之前生效）：本脚本一律设 `=900000`（= 15 分钟）→ **bodyBreak 启动后一两个
    tick 就到点**，每个 bodyBreak 用例从 15.5 分钟压到几秒。
+   **注意该钩子是"一次性消耗"的**（2026-11-15 语义变更）：只在第一次 tick 把久坐累计推上去，
+   之后立刻失效、回到真实累加。这正好合用 —— 休息结束时 `ResetWork()` 会把久坐累计归零，
+   所以**不会出现"每轮休息后又立刻到点"的无限循环**；每个用例都是新进程，钩子各自生效一次。
    仍有两条硬要求：`WorkMinutes=20`（否则 60s 会先弹普通休息、ResetWork 把久坐累积清零）、
    `SedentaryMinutes=15`（钳制下限，保持真实）。
    钩子没编进构建时的自保：bodyBreak 若 150s 内没出现，判 **SKIP**（"钩子未生效"），
@@ -868,7 +871,7 @@ def case_edge(base_orig, results):
             pump(0.15)
         print('    整屏穿透层首现=%s' % (('%.1fs' % seen_glow) if seen_glow else '无'))
 
-        t_ov, _ = wait_overlay(30.0, tag='等遮罩')
+        t_ov, _ = wait_overlay(70.0, tag='等遮罩')
         gone_after = None
         if t_ov is not None:
             pump(1.2)
@@ -907,9 +910,19 @@ def case_e6(base_orig, results):
             results.append(('E6 %s' % label, False, '遮罩未出现'))
             continue
         hwnd = overlay_windows()[0][0]
-        texts = child_texts(hwnd)
-        hint = [t for t in texts if '秒后锁定' in t]
-        print('  遮罩 %.0fs；子窗口文本=%s' % (t_ov, texts))
+        # 子控件是 WinForms 里"显示时才建句柄"的，刚判定遮罩可见的那一刻去枚举
+        # 可能一个都读不到（实测 E6 首跑就是 texts=[]）。这里给 3 秒重试窗口。
+        texts = []
+        hint = []
+        t_txt = time.time()
+        while time.time() - t_txt < 3.0:
+            texts = child_texts(hwnd)
+            hint = [t for t in texts if '秒后锁定' in t]
+            if texts and (hint or lcs == 0):
+                break
+            pump(0.2)
+        print('  遮罩 %.0fs；子窗口文本=%s%s'
+              % (t_ov, texts, ('  倒计时文案=%s' % hint) if hint else ''))
 
         # 遮罩刚出现时立刻探（必须趁倒计时还没走完）
         early = probe(VK_F24)
@@ -954,7 +967,12 @@ def case_stats(base_orig, results):
                 return None
             click_child(btn[0])
             wait_overlay_gone(5.0)
-        pump(1.0)
+        else:
+            # 「坐满一轮」必须**等休息自然结束**（RestSeconds 到期 → EndRest(true)
+            # → CountStatDone）。首跑这里漏了等待、遮罩出现 1s 就读 config，
+            # StatDone 当然还是 0 —— 那是我的 bug，不是产品不计数。
+            wait_overlay_gone(30.0)
+        pump(1.2)
         d = read_cfg()
         return (int(d.get('StatDone', '-1') or -1),
                 int(d.get('StatSkip', '-1') or -1))

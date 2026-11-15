@@ -55,6 +55,16 @@ user32.GetWindowLongW.argtypes = [wt.HWND, ctypes.c_int]
 
 DIM_SEEN = [False]       # 压暗层是否出现过（信息项，不参与判定）
 
+# ---- 提速开关：判据是布尔的，所以"到点前那段"可以靠钩子压缩 ----
+# 外部注入 EYE_LITE_FAKE_WORK_MS=59000 时，第一个 tick 就把工作累计推到 59s，
+# 到点只差 1s → 观测 12s 就足以覆盖"越过到点"；未注入时保持原 95s 窗口。
+_FAKE_WORK = os.environ.get('EYE_LITE_FAKE_WORK_MS', '').strip()
+try:
+    _FAKE_WORK_OK = int(_FAKE_WORK) >= 0
+except Exception:
+    _FAKE_WORK_OK = False
+WATCH_S = 12.0 if _FAKE_WORK_OK else 95.0
+
 
 def ex_style(hwnd):
     return user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
@@ -243,6 +253,9 @@ def main():
     print('original config keys:', sorted(backup.keys()))
 
     results = []
+    print('观测窗口 = %.0fs（%s）'
+          % (WATCH_S, 'FAKE_WORK_MS 生效 → 压缩模式' if _FAKE_WORK_OK
+             else '未注入钩子 → 完整窗口'))
     try:
         # ---- 准备一份快节奏配置：工作 1 分钟，休息 8 秒，预告 30 秒 ----
         base = dict(backup)
@@ -279,11 +292,17 @@ def main():
             time.sleep(2.0)   # 让进程起来
 
             # 工作 1 分钟 → 预告横幅约在 30s 出现，遮罩约在 60s 出现。
-            # 一次性连续监测 95s，同时记录横幅与遮罩的首次出现时刻。
+            # 一次性连续监测，同时记录横幅与遮罩的首次出现时刻。
+            #
+            # **提速（2026-11-15）**：本脚本的判据是**布尔**的（overlay 该不该出现），
+            # 与"第几秒出现"无关，所以外部注入 `EYE_LITE_FAKE_WORK_MS=59000` 时，
+            # 第一个 tick 就把工作累计推到 59s（距到点只差 1s）→ 只需观测很短一段
+            # 就已经"越过到点"，等价于不注入时看 95s。
+            # 未注入时仍按原来的 95s 窗口跑，行为与旧版一致。
             t0 = time.time()
             first_preview = None
             first_overlay = None
-            while time.time() - t0 < 95.0:
+            while time.time() - t0 < WATCH_S:
                 if first_preview is None and preview_windows():
                     first_preview = time.time() - t0
                 if first_overlay is None and overlay_windows():

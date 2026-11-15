@@ -6473,9 +6473,30 @@ namespace EyeLite
             // 用户还来得及用鼠标「跳过」/「推迟」。
             if (needHook && cfg.StrictMode && cfg.LockCountdownSeconds > 0)
             {
-                long nowRest = Clock.NowMs();
-                lockDueMs = nowRest + (long)cfg.LockCountdownSeconds * 1000L;
-                try { SetLockCountdownOnForms(cfg.LockCountdownSeconds); } catch { }
+                // 倒计时不得吃掉整段休息：否则"严格模式"在短休息下**永远不锁**。
+                //   例如 RestSeconds=8、LockCountdownSeconds=15（默认）→ 8 秒休息里
+                //   钩子从头到尾没装上，用户打开了严格模式却完全没被锁
+                //   （实测 TC 对照组：F24 放行 2 条，期望 0）。
+                // 规则：最多用掉"休息时长 - 3 秒"，至少给真锁留 3 秒；
+                //      休息本身 ≤3 秒时不给倒计时，立即锁。
+                // 这也让默认配置（20 分钟 / 20 秒）从"只有最后 5 秒锁"变成明确的"最后 5 秒锁"，
+                // 而不是"15 秒自由 + 5 秒锁"这种说不清的行为。
+                int cd = cfg.LockCountdownSeconds;
+                int cap = restTotalSeconds - 3;
+                if (cd > cap) cd = cap;
+
+                if (cd <= 0)
+                {
+                    lockDueMs = 0;
+                    try { SetLockCountdownOnForms(-1); } catch { }
+                    InstallRestHookNow();
+                }
+                else
+                {
+                    long nowRest = Clock.NowMs();
+                    lockDueMs = nowRest + (long)cd * 1000L;
+                    try { SetLockCountdownOnForms(cd); } catch { }
+                }
             }
             else
             {

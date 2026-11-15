@@ -108,14 +108,25 @@ def stop_eyelite():
 
 
 TESTS = [
-    ('p0a 计时精度',        'tools/p0a-timing-check.py', []),
-    ('p0e 严格档输入',      'tools/p0e-input-check.py', []),
-    ('p0c 闸门 6 例',       'tools/p0c-gate-check.py', []),
-    ('p0c 抑制 + 强制放行', 'tools/p0c-suppress-check.py', ['all']),
-    ('p0b 预告 5 例',       'tools/p0b-preview-check.py', []),
-    ('p0b 三出口',          'tools/p0b-exits-check.py', []),
-    ('p0a2 A2/A3 + 内存',   'tools/p0a2-a3-check.py', []),
-    ('p0d 空闲计时',        'tools/p0d-idle-check.py', []),
+    # (标题, 脚本, 额外参数, 额外环境变量)
+    #
+    # 第三列 = 传给被测脚本的进程环境变量。**只有"判据是布尔"的脚本才能压**：
+    #   · 断言的是"有没有出现/吞没吞" → 可以用 EYE_LITE_FAKE_WORK_MS 把工作累计
+    #     一次性推到接近到点，省掉 60~95 秒的等待
+    #   · 断言的是"第几秒出现"（p0a 的 60±3s、p0b 预告的 50±4s、p0d 的 58.7s、
+    #     p0c C-9 的 60s 上限）→ **绝对不压**，压了结论就站不住
+    ('p0a 计时精度',        'tools/p0a-timing-check.py', [], {}),
+    ('p0e 严格档输入',      'tools/p0e-input-check.py', [],
+     {'EYE_LITE_FAKE_WORK_MS': '59000'}),          # 布尔：吞 0 条 / 放行 2 条
+    ('p0c 闸门 6 例',       'tools/p0c-gate-check.py', [],
+     {'EYE_LITE_FAKE_WORK_MS': '59000'}),          # 布尔：overlay True/False
+    ('p0c 抑制 + 强制放行', 'tools/p0c-suppress-check.py', ['all'],
+     {'EYE_LITE_FAKE_WORK_MS': '59000'}),          # C7/C8 可压；C9 仍真等 60s
+    ('p0b 预告 5 例',       'tools/p0b-preview-check.py', [], {}),   # T1 断言 50±4s，不压
+    ('p0b 三出口',          'tools/p0b-exits-check.py', [], {}),
+    ('p0a2 A2/A3 + 内存',   'tools/p0a2-a3-check.py', [],
+     {'EYE_LITE_FAKE_WORK_MS': '119000'}),         # MEM/GDI 仍真等 180s；A2 三项布尔
+    ('p0d 空闲计时',        'tools/p0d-idle-check.py', [], {}),      # 断言 58.7s 左右，不压
 ]
 
 
@@ -145,7 +156,7 @@ def main():
 
     results = []
     try:
-        for title, rel, extra in TESTS:
+        for title, rel, extra, env_extra in TESTS:
             if filters and not any(f in rel for f in filters):
                 continue
             script = os.path.join(ROOT, rel)
@@ -156,15 +167,29 @@ def main():
 
             print('\n' + '#' * 72)
             print('# %s  (%s)' % (title, rel))
+            if env_extra:
+                print('# 注入环境变量: %s' % ', '.join(
+                    '%s=%s' % kv for kv in sorted(env_extra.items())))
             print('#' * 72)
 
             stop_eyelite()
             write_cfg(BASE_CFG)
 
+            # 按脚本传环境变量：脚本内部用 os.environ.copy() 起 EyeLite，
+            # 只要它没显式清掉这个键就会被继承（各脚本只 pop 自己认识的那几个）。
+            child_env = os.environ.copy()
+            for k in ('EYE_LITE_FORCE_QUNS', 'EYE_LITE_FORCE_QUNS_FILE',
+                      'EYE_LITE_SUPPRESS_MAX_MS', 'EYE_LITE_FAKE_IDLE_MS',
+                      'EYE_LITE_FAKE_IDLE_FILE', 'EYE_LITE_FAKE_WORK_MS',
+                      'EYE_LITE_FAKE_SED_MS', 'EYE_LITE_TRACE_FILE'):
+                child_env.pop(k, None)          # 先清干净，避免上一项的钩子串场
+            child_env.update(env_extra)
+
             t0 = time.time()
             try:
                 p = subprocess.run([PY, '-u', script] + extra,
-                                   cwd=ROOT, capture_output=True, timeout=1500)
+                                   cwd=ROOT, capture_output=True, timeout=1500,
+                                   env=child_env)
                 out = p.stdout.decode('utf-8', 'ignore')
                 err = p.stderr.decode('utf-8', 'ignore')
                 code = p.returncode

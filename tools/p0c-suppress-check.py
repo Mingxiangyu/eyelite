@@ -271,6 +271,22 @@ def list_windows():
 
 _pid_cache = set()
 
+# ---- 提速开关（2026-11-15）----
+# p0c 的 C-7 / C-8 判据都是**布尔**的（抑制期"有没有"提醒、键"有没有"被吞；
+# 解除后"多久"补弹是 C-8 的数值判据，仍然保留真实测量）。
+# 外部注入 EYE_LITE_FAKE_WORK_MS=59000 → 第一个 tick 工作累计就到 59s，
+# 到点只差 1s，于是只需十几秒就"越过到点"，等价于不注入时看 95s。
+# **C-9（抑制上限 60s 强制放行）必须真实等 60s，不参与压缩。**
+_FAKE_WORK = os.environ.get('EYE_LITE_FAKE_WORK_MS', '').strip()
+try:
+    _FAKE_WORK_OK = int(_FAKE_WORK) >= 0
+except Exception:
+    _FAKE_WORK_OK = False
+
+C7_CHECKPOINTS = (5.0, 9.0, 13.0) if _FAKE_WORK_OK else (35.0, 68.0, 92.0)
+C7_WATCH_S = 15.0 if _FAKE_WORK_OK else 95.0
+C8_PRE_FLIP_S = 10.0 if _FAKE_WORK_OK else 95.0
+
 
 def own_windows():
     if not _pid_cache:
@@ -601,8 +617,13 @@ def case_c7(results, base):
 
     # 时间点选择：预告窗口本该在 ~30s 开，遮罩本该在 ~60s 出。
     # 35s / 68s / 92s 三个点分别覆盖"抑制掉预告"、"抑制掉遮罩"、"越过到点之后"。
+    #
+    # **提速**：外部注入 `EYE_LITE_FAKE_WORK_MS=59000` 时，第一个 tick 就把工作累计
+    # 推到 59s → 到点只差 1s，于是 5/9/13s 三个点等价于原来的 35/68/92s
+    # （C-7 的判据是布尔：抑制期"有没有"横幅/遮罩 + 键"有没有"被吞，与"第几秒"无关）。
+    # 未注入时保持原检查点，行为与旧版一致。
     probes = []
-    for cp in (35.0, 68.0, 92.0):
+    for cp in (C7_CHECKPOINTS if _FAKE_WORK_OK else (35.0, 68.0, 92.0)):
         tl.until(cp)
         print('  %.0fs：preview=%s overlay=%s  注入 F24/Ctrl'
               % (cp, 'YES' if tl.first_preview is not None else 'no',
@@ -616,15 +637,16 @@ def case_c7(results, base):
               % (n_f24, desc_ctrl))
         release_all()
 
-    tl.until(95.0)
+    tl.until(C7_WATCH_S)
 
     no_banner = tl.first_preview is None
     no_overlay = tl.first_overlay is None
     all_passed = all(p[1] == 2 for p in probes)
     ctrl_ok = all(p[2] for p in probes)
-    detail = ('横幅=%s 遮罩=%s（95s 内）；F24 放行 %s（每次期望 2）；Ctrl %s；压暗层=%s'
+    detail = ('横幅=%s 遮罩=%s（%.0fs 内）；F24 放行 %s（每次期望 2）；Ctrl %s；压暗层=%s'
               % ('无' if no_banner else '有@%.1fs' % tl.first_preview,
                  '无' if no_overlay else '有@%.1fs' % tl.first_overlay,
+                 C7_WATCH_S,
                  '/'.join(str(p[1]) for p in probes),
                  '全部成对' if ctrl_ok else '存在半吞',
                  '无' if tl.first_dim is None else '有@%.1fs（信息项，不参与判定）'
@@ -694,9 +716,10 @@ def case_c8(results, base):
     print('  已启动：%s=%s（WorkMinutes=1 PreviewSeconds=0 RestSeconds=8）'
           % (QUNS_FILE_ENV, QUNS_FILE))
 
-    # ---- 阶段一：抑制 95s，到点（60s）已过，必须毫无提醒 ----
+    # ---- 阶段一：抑制一段时间，到点已过，必须毫无提醒 ----
+    # 提速：注入 FAKE_WORK_MS 时只需 ~10s 就"越过到点"（见文件头说明）。
     tl = Timeline('抑制期')
-    tl.until(95.0)
+    tl.until(C8_PRE_FLIP_S)
     if tl.first_overlay is not None:
         results.append(('C8 解除后补弹', False,
                         '仪器自检失败：抑制期 %.1fs 就出现遮罩，'
@@ -705,8 +728,9 @@ def case_c8(results, base):
     if tl.first_preview is not None:
         print('  NOTE: PreviewSeconds=0 却出现了横幅 @%.1fs（另一处异常）'
               % tl.first_preview)
-    print('  抑制 95s：遮罩=%s 横幅=%s 压暗层=%s（到点 60s 已过）'
-          % ('无' if tl.first_overlay is None else '有',
+    print('  抑制 %.0fs：遮罩=%s 横幅=%s 压暗层=%s（到点 60s 已过）'
+          % (C8_PRE_FLIP_S,
+             '无' if tl.first_overlay is None else '有',
              '无' if tl.first_preview is None else '有',
              '无' if tl.first_dim is None else '有@%.1fs（信息项）' % tl.first_dim))
 
@@ -717,8 +741,8 @@ def case_c8(results, base):
     d = wait_overlay(30.0)
     if d is None:
         results.append(('C8 解除后补弹', False,
-                        '抑制 95s 无遮罩（前提成立）；但改文件为 0 后 30s 内仍无遮罩'
-                        '（文件钩子没被重读？）'))
+                        '抑制 %.0fs 无遮罩（前提成立）；但改文件为 0 后 30s 内仍无遮罩'
+                        '（文件钩子没被重读？）' % C8_PRE_FLIP_S))
         return
     total = time.time() - t_flip
     print('  遮罩在改文件后 %.2fs 出现（等待函数口径 %.2fs）' % (total, d))
@@ -738,9 +762,10 @@ def case_c8(results, base):
     expect_note = '' if total <= 5.0 else (
         '  <-- 期望 ≤5s；若接近 60s 说明是"重新计时"而不是补弹')
     results.append(('C8 解除后补弹', ok,
-                    '抑制 95s 无遮罩/无横幅；改文件→遮罩 %.2fs（期望 ≤5s，'
+                    '抑制 %.0fs 无遮罩/无横幅；改文件→遮罩 %.2fs（期望 ≤5s，'
                     '重新计时会是 ≈60s）；休息 %.1fs%s'
-                    % (total, rest if rest is not None else -1, expect_note)))
+                    % (C8_PRE_FLIP_S, total, rest if rest is not None else -1,
+                       expect_note)))
 
 
 def case_c9(results, base):

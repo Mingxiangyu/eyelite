@@ -46,6 +46,17 @@ VK_F24 = 0x87
 
 EnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
 
+# ---- 提速开关（2026-11-15，lead 批准）----
+# 只有"布尔否定断言"的那一项（A2-OFF：等一个**不该出现**的压暗层）可以缩短观测窗口：
+# 注入 EYE_LITE_FAKE_WORK_MS 后，阳性（DimAlphaMax>0）会在 ~1s 就出现，
+# 所以 12s 足以证伪；不注入时保持原 80s。
+_FAKE_WORK = os.environ.get('EYE_LITE_FAKE_WORK_MS', '').strip()
+try:
+    _FAKE_WORK_OK = int(_FAKE_WORK) >= 0
+except Exception:
+    _FAKE_WORK_OK = False
+OFF_DIM_TIMEOUT_S = 12.0 if _FAKE_WORK_OK else 80.0
+
 
 def _ex_style(hwnd):
     """取扩展样式。
@@ -374,7 +385,11 @@ def main():
         off['DimAlphaMax'] = '0'
         write_cfg(off)
         p = launch()
-        t_dim = wait_window(p.pid, 'dim', 80.0)
+        # 这是**布尔否定断言**（"关掉时确实不建压暗层"），不是"等得久才更确定"。
+        # 注入 EYE_LITE_FAKE_WORK_MS 时，若 DimAlphaMax>0 压暗层会在 ~1s 就出现，
+        # 所以 12s 足够证伪；不注入时仍按原来的 80s 跑（行为不变）。
+        # （改动经 lead 2026-11-15 批准：原本固定 80s，压完省 68s。）
+        t_dim = wait_window(p.pid, 'dim', OFF_DIM_TIMEOUT_S)
         has_ovl = bool(overlay_windows(p.pid))
         results.append(('A2-OFF DimAlphaMax=0 时不建压暗层', t_dim is None and not has_ovl,
                         'dim=%s overlay=%s' % (
