@@ -5035,7 +5035,6 @@ namespace EyeLite
         private long sedLimitMs = 0;         // 久坐：当前到期阈值（推迟时会被延长）
         private long lastAnchorMs = 0;       // 上次 tick 的单调时刻，用于算 dt
         private DateTime lastTickUtc = DateTime.UtcNow;  // 上次 tick 的墙钟时刻，用于休眠补洞
-        private long idleGapSeconds = 0;     // 累计补记的空闲秒数（休眠/卡顿期间人不在）
         private long restDueMs = 0;          // 当前这次休息的结束时刻（绝对锚点）
         private int restTotalSeconds = 0;    // 本次休息总时长（秒），给 UI 用
         private int restRemaining = 0;        // 本次休息剩余秒数（每次 tick 重算后给 UI 用）
@@ -5466,11 +5465,11 @@ namespace EyeLite
                 if (sleptAway)
                 {
                     // 补记的时段一律归 Idle（Paused 语义），不补进活跃时长。
-                    // 单次补记封顶 24 小时（契约 §5 兜底第 1 条）。
-                    long gap = wallDelta > 0 ? wallDelta : qpcDeltaSec;
-                    if (gap > 86400) gap = 86400;
-                    idleGapSeconds += gap;
-                    // 锚点重置，让下一 tick 从 0 开始累加，不把这段补洞时长算进活跃时长。
+                    //
+                    // 实现上只需要"丢弃这段 dt"：累加器不加，就等于这段时间没被算成用眼。
+                    // 这里原本还有一个 idleGapSeconds 累计（带 24 小时封顶），但全程序
+                    // 只写不读 —— 属于"派生状态重复存储"（契约通则第 1 条），已删除。
+                    // 保留 24 小时封顶这件事本身也失去意义：dt 被直接丢弃，不存在溢出。
                     dt = 0;
                 }
 
@@ -7169,6 +7168,11 @@ namespace EyeLite
             // 强度记账一并归零：否则"撤掉后重新进窗口"时会因为 alpha 没变而不再写入，
             // 表现为压暗层再也不出现。所有"不该暗"的分支都会走到这里，所以放这一处即可。
             dimLastAlpha = -1.0;
+            // 档位也要归零。理由不是"防不暗"，而是"防延迟半秒"：
+            // 若撤掉时 dimLastStep 还停在 60（窗口末尾的档位），重新进窗口后要等到
+            // 档位再次变化（1000ms 一档）才会写入第一帧 —— 表现为压下后要等最多 1 秒才见暗。
+            // 调用方大多也会自己置 -1，但那依赖每个分支都记得写；放在这里才是不变式。
+            dimLastStep = -1;
             if (dimForms == null) return;
 
             for (int i = 0; i < dimForms.Count; i++)
