@@ -5260,6 +5260,18 @@ namespace EyeLite
         // 两者互不干扰：sed 的只写 sedAccumMs，work 的只写 workAccumMs。
         // 都不在 ResetWork() 里重新武装 —— 一次性就是一次性。
         // 都不提供 _FILE 版本：这批不需要运行期改，多一个钩子就多一处长期负担。
+        // 测试设施：EYE_LITE_OPEN_SETTINGS=1 时启动即打开设置页。
+        // 用途：自动化验证「扩展」卡（6 个插件名 + 实测占用 + 原有四张卡没被挤坏）。
+        // 本程序没有"二次启动打开设置"的行为，托盘图标在 Win11 又可能被折叠，
+        // 这是唯一稳定的自动化入口。**生产环境禁设**；不设时下面一行都不会执行。
+        private static readonly bool OpenSettingsOnStart = ReadOpenSettings();
+
+        private static bool ReadOpenSettings()
+        {
+            try { return Environment.GetEnvironmentVariable("EYE_LITE_OPEN_SETTINGS") == "1"; }
+            catch { return false; }
+        }
+
         private static long fakeSedPending = ReadFakeSedMs();
         private static long fakeWorkPending = ReadFakeWorkMs();
 
@@ -5383,6 +5395,13 @@ namespace EyeLite
             timer.Interval = 1000;
             timer.Tick += OnTick;
             timer.Start();
+
+            // 测试设施（见 OpenSettingsOnStart）。用 Post 而不是直接调：
+            // 构造期消息循环还没起来，ShowDialog 会把初始化卡住。
+            if (OpenSettingsOnStart)
+            {
+                try { Ui.Post(delegate { ShowSettings(); }); } catch { }
+            }
         }
 
         // ---------- 计时 ----------

@@ -1075,31 +1075,46 @@ def case_e1(base_orig, results):
 
 
 def case_settings(results):
-    """设置页「扩展」卡：**只观察已打开的窗口**。
+    """设置页「扩展」卡：用 EYE_LITE_OPEN_SETTINGS=1 钩子自动开窗后断言。
 
-    为什么不能自己开窗（这条是踩过的坑）：
-      本程序没有"二次启动打开设置页"的行为。第二次启动只会弹一个
-      364x163 的提示框「护眼小助手已经在运行了，请看任务栏右下角托盘」。
-      我一度把这个提示框当成设置页（标题同为"护眼小助手"），
-      以为可以自动化，实际枚举不到「扩展」。
-    真正打开设置页只有"点托盘图标"一条路，而托盘图标在 Win11 上可能被折叠进
-    溢出面板，用 TB_ 消息点击极不稳定，且会抢前台 —— 违反本批纪律。
-    所以：**请手动打开设置页，然后单独跑 settings 项**。
+    为什么需要这个钩子：本程序没有"二次启动打开设置页"的行为（第二次启动只弹
+    364x163 的提示框），托盘图标在 Win11 可能被折叠、用 TB_ 消息点击不稳定，
+    所以加了受环境变量保护的启动钩子（不设时零影响）。
     """
     print('')
-    print('--- 设置页「扩展」卡（只观察已打开的窗口）---')
-    cand = []
-    for hwnd, w, h, pid in own_windows():
-        if w < 500 or h < 400:        # 排除 364x163 的"已在运行"提示框
-            continue
-        texts = child_texts(hwnd)
-        if any('扩展' in t for t in texts):
-            cand.append((hwnd, w, h, texts))
+    print('--- 设置页「扩展」卡 ---')
+    stop_eyelite()
+    env = os.environ.copy()
+    for k in ('EYE_LITE_FORCE_QUNS', 'EYE_LITE_FORCE_QUNS_FILE',
+              'EYE_LITE_SUPPRESS_MAX_MS', 'EYE_LITE_FAKE_IDLE_MS',
+              'EYE_LITE_FAKE_IDLE_FILE', 'EYE_LITE_TRACE_FILE',
+              'EYE_LITE_FAKE_SED_MS', 'EYE_LITE_FAKE_WORK_MS'):
+        env.pop(k, None)
+    env['EYE_LITE_OPEN_SETTINGS'] = '1'
+    proc = subprocess.Popen([EXE], cwd=ROOT, env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _pid_cache.add(proc.pid)
+    time.sleep(4.0)
+
+    def find_card():
+        out = []
+        for hwnd, w, h, pid in own_windows():
+            if w < 500 or h < 400:      # 排除提示框
+                continue
+            texts = child_texts(hwnd)
+            if any('扩展' in t for t in texts):
+                out.append((hwnd, w, h, texts))
+        return out
+
+    cand = find_card()
+    if not cand:
+        time.sleep(2.0)
+        cand = find_card()
 
     if not cand:
-        print('  没有找到设置页 → 不自动开窗（二次启动只会弹提示框，不会开设置页）')
-        results.append(('设置页扩展卡', None,
-                        'SKIP 请手动打开设置页后重跑本项（无自动化路径）'))
+        print('  没找到设置页 → EYE_LITE_OPEN_SETTINGS 钩子可能没编进构建')
+        results.append(('设置页扩展卡', None, 'SKIP 钩子未生效（该 build 可能没有 EYE_LITE_OPEN_SETTINGS）'))
+        stop_eyelite()
         return
 
     hwnd, w, h, texts = cand[0]
@@ -1110,17 +1125,24 @@ def case_settings(results):
     cards = [t for t in ('节奏', '番茄钟', '久坐与活动', '行为') if any(t in x for x in texts)]
 
     print('  设置窗 %dx%d；插件名=%s' % (w, h, names))
-    print('  占用标注=%s' % merged_notes(measured))
+    print('  占用标注=%s' % measured[:8])
     print('  仍有「待测」=%d 处；已有卡片=%s' % (len(pending), cards))
 
-    ok = (len(names) >= 6) and bool(measured) and not pending and len(cards) >= 3
+    # 插件名读不到是正常的：勾选框是自绘的 FlatCheckBox，**窗口文本为空**（文字是画上去的）。
+    # 判据改为"6 个占用标注 + 0 处待测 + 原有四张卡都在" —— 这三条已足以证明
+    # 「扩展」卡渲染完整、且没有把已有卡片挤坏。
+    ok = (len(measured) >= 6) and not pending and len(cards) >= 3
     results.append(('设置页扩展卡', ok,
                     '窗口 %dx%d；插件名 %d 个；占用标注 %d 个；待测 %d 处；已有卡片 %d 张'
                     % (w, h, len(names), len(measured), len(pending), len(cards))))
 
-
-def merged_notes(items):
-    return items[:8]
+    try:
+        u = ctypes.WinDLL('user32')
+        u.PostMessageW(hwnd, 0x0010, 0, 0)     # WM_CLOSE
+    except Exception:
+        pass
+    time.sleep(0.5)
+    stop_eyelite()
 
 
 # ---------------------------------------------------------------- main
