@@ -2260,7 +2260,88 @@ namespace EyeLite
         {
             if (!enabled || cfg == null) return;
             cfg.StatDone++;
+            AddToday(cfg);
             Persist(cfg);
+        }
+
+        // ---------- 最近 7 天（迷你图的数据层）----------
+        //
+        // 只存"每天完成了几次"。跳过/忽略不画图：一张图里塞三种状态谁都读不出来，
+        // 而"完成了多少"才是用户唯一会拿来看趋势的量。
+        private static void AddToday(AppConfig cfg)
+        {
+            string today = DateTime.Now.ToString("yyyy-MM-dd");
+            long todayCount = 0;
+            List<string> keep = new List<string>();
+
+            if (cfg.StatHistory != null && cfg.StatHistory.Length > 0)
+            {
+                string[] parts = cfg.StatHistory.Split(';');
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    string one = parts[i];
+                    if (one == null) continue;
+                    one = one.Trim();
+                    int c = one.IndexOf(':');
+                    if (c <= 0) continue;
+                    string d = one.Substring(0, c);
+                    long n = 0;
+                    try { n = long.Parse(one.Substring(c + 1)); } catch { n = 0; }
+                    if (d == today) { todayCount = n; continue; }   // 今天由下面重算
+                    keep.Add(d + ":" + n.ToString());
+                }
+            }
+
+            keep.Add(today + ":" + (todayCount + 1).ToString());
+            keep.Sort(StringComparer.Ordinal);                      // ISO 日期天然可比
+            while (keep.Count > 7) keep.RemoveAt(0);
+            cfg.StatHistory = string.Join(";", keep.ToArray());
+        }
+
+        /// <summary>
+        /// 最近 7 天的完成次数，转成 7 个字符的迷你柱（缺的日期按 0 算）。
+        /// 用字符而不是画图：数据只有 7 个点，画一张图要新控件、要重算卡片版式，
+        /// 而 sparkline 一行字就能看出趋势，改版面的风险却是实在的。
+        /// </summary>
+        public static string Sparkline(AppConfig cfg)
+        {
+            const string Levels = "·▁▂▃▄▅▆▇█";
+            long[] counts = new long[7];
+            if (cfg != null && cfg.StatHistory != null && cfg.StatHistory.Length > 0)
+            {
+                string[] parts = cfg.StatHistory.Split(';');
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    string one = parts[i];
+                    if (one == null) continue;
+                    one = one.Trim();
+                    int c = one.IndexOf(':');
+                    if (c <= 0) continue;
+                    try
+                    {
+                        DateTime d = DateTime.ParseExact(one.Substring(0, c), "yyyy-MM-dd", null);
+                        int slot = 6 - (int)(DateTime.Today - d.Date).TotalDays;
+                        if (slot < 0 || slot > 6) continue;
+                        counts[slot] = long.Parse(one.Substring(c + 1));
+                    }
+                    catch { }
+                }
+            }
+
+            long max = 0;
+            for (int i = 0; i < 7; i++) if (counts[i] > max) max = counts[i];
+
+            char[] outChars = new char[7];
+            for (int i = 0; i < 7; i++)
+            {
+                if (counts[i] <= 0 || max <= 0) { outChars[i] = Levels[0]; continue; }
+                // 1..8 档：最小值固定占 1 档（"有值就看得见"），最大值占满 8 档
+                int idx = 1 + (int)((counts[i] * 7L) / max);
+                if (idx < 1) idx = 1;
+                if (idx > 8) idx = 8;
+                outChars[i] = Levels[idx];
+            }
+            return new string(outChars);
         }
 
         public void BumpSkip(AppConfig cfg)
@@ -3108,6 +3189,11 @@ namespace EyeLite
         public int StatSkip = 0;
         public int StatIgnore = 0;
 
+        // 最近 7 天的"完成次数"历史，格式：`yyyy-MM-dd:count;yyyy-MM-dd:count;...`（按日期升序）。
+        // 为什么塞进配置文件而不是单独文件：数据量极小（最多 7 条），
+        // 跟现有原子写盘一起走，不必多一条 IO 路径和一份损坏处理。
+        public string StatHistory = "";
+
         public static string ConfigDir
         {
             get
@@ -3178,6 +3264,7 @@ namespace EyeLite
                         case "StatDone": c.StatDone = Clamp(v, 0, 0, 100000000); break;
                         case "StatSkip": c.StatSkip = Clamp(v, 0, 0, 100000000); break;
                         case "StatIgnore": c.StatIgnore = Clamp(v, 0, 0, 100000000); break;
+                        case "StatHistory": c.StatHistory = v == null ? "" : v.Trim(); break;
                     }
                 }
             }
@@ -3238,6 +3325,7 @@ namespace EyeLite
                 sb.AppendLine("StatDone=" + StatDone);
                 sb.AppendLine("StatSkip=" + StatSkip);
                 sb.AppendLine("StatIgnore=" + StatIgnore);
+                sb.AppendLine("StatHistory=" + (StatHistory == null ? "" : StatHistory));
                 File.WriteAllText(ConfigPath, sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -4646,17 +4734,22 @@ namespace EyeLite
             if (cfg.Plugin_Stats)
             {
                 int statTop = cursorTop + Sc(Gap);
-                RoundPanel cardStat = AddCard(statTop, Sc(168), "统计");
+                int statH = Sc(168) + Sc(RowHeight);
+                RoundPanel cardStat = AddCard(statTop, statH, "统计");
 
                 AddInfoRow(cardStat, Sc(FirstRowTop), "完成 " + cfg.StatDone + " 次", Ui.LabelText);
                 AddInfoRow(cardStat, Sc(FirstRowTop) + Sc(RowHeight) * 1, "跳过 " + cfg.StatSkip + " 次", Ui.LabelText);
                 AddInfoRow(cardStat, Sc(FirstRowTop) + Sc(RowHeight) * 2, "忽略 " + cfg.StatIgnore + " 次", Ui.LabelText);
+                // 最近 7 天趋势：只画"完成"，因为三种状态挤一张图谁都读不出来。
+                AddInfoRow(cardStat, Sc(FirstRowTop) + Sc(RowHeight) * 3,
+                           "最近 7 天完成：" + StatsPlugin.Sparkline(cfg)
+                           + "（左旧右新）", Ui.LabelText);
                 // 这句不是免责声明套话：三态计数非常容易被读成"用眼健康评分"，
                 // 必须明确这不是健康判断，否则就是在制造焦虑。
-                AddInfoRow(cardStat, Sc(FirstRowTop) + Sc(RowHeight) * 3,
+                AddInfoRow(cardStat, Sc(FirstRowTop) + Sc(RowHeight) * 4,
                            "这不是健康诊断，只记录发生过的次数", Ui.CaptionText);
 
-                cursorTop = statTop + Sc(168);
+                cursorTop = statTop + statH;
             }
 
             // ---------- 底部按钮：最后一排卡片底部 + Sc(24) ----------
@@ -5361,6 +5454,23 @@ namespace EyeLite
                 UpdateTrayText();
             };
             menu.Items.Add(miPomodoro);
+
+            // 托盘里也能开关插件。设置页「扩展」卡要点开设置才能改，而插件是"试一下"的东西，
+            // 从托盘勾更快。走同一条 PluginHost.SetOn + cfg.Save 路径，失败回滚（见 TogglePluginFromTray）。
+            ToolStripMenuItem miPlugins = new ToolStripMenuItem("扩展");
+            for (int pi = 0; pi < PluginHost.All.Count; pi++)
+            {
+                PluginDescriptor pd = PluginHost.All[pi];
+                if (pd.Factory == null) continue;      // 未实现的占位不进菜单
+                ToolStripMenuItem item = new ToolStripMenuItem(pd.DisplayName);
+                item.CheckOnClick = true;
+                item.Checked = PluginHost.IsOn(pd.Id);
+                string pluginId = pd.Id;               // 闭包：必须捕获值，不能捕获循环体里的引用
+                ToolStripMenuItem self = item;
+                item.Click += delegate { TogglePluginFromTray(pluginId, self); };
+                miPlugins.DropDownItems.Add(item);
+            }
+            menu.Items.Add(miPlugins);
 
             menu.Items.Add(new ToolStripSeparator());
 
@@ -6901,6 +7011,32 @@ namespace EyeLite
         }
 
         // ---------- 设置 ----------
+        /// <summary>
+        /// 托盘里的插件开关。
+        ///
+        /// 失败必须回滚勾选并告知：插件 OnEnable 可能建窗/建 Timer 失败，
+        /// 留在"勾上了但没生效"的状态比不勾更糟（与设置页「扩展」卡同一套纪律）。
+        /// </summary>
+        private void TogglePluginFromTray(string id, ToolStripMenuItem item)
+        {
+            try
+            {
+                PluginHost.SetOn(id, item.Checked, cfg);
+                cfg.Save();
+                UpdateTrayText();
+            }
+            catch (Exception ex)
+            {
+                item.Checked = !item.Checked;
+                try
+                {
+                    MessageBox.Show("插件没能启动：" + ex.Message, "护眼小助手",
+                                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                catch { }
+            }
+        }
+
         private void ShowSettings()
         {
             using (SettingsForm f = new SettingsForm(cfg))
