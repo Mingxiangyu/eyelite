@@ -1049,6 +1049,140 @@ namespace EyeLite
         BusyDnd = 6
     }
 
+    /// <summary>
+    /// 会议检测（C2）：判断"现在是否真的在开会"。
+    ///
+    /// 判据是**进程白名单 + 该进程有可见窗口 + 窗口标题命中关键词**，三条同时成立。
+    ///   · 为什么不能只看进程：装了 Zoom/Teams 的人常年开着客户端，只看进程就等于"永不提醒"，
+    ///     那正是 §10.1 说的"坏掉的版本"。
+    ///   · 为什么要看标题：客户端主窗口（聊天/日程）和会议窗口标题不同，前者不该抑制。
+    ///
+    /// fail-open：任何一步取不到（进程已退出、权限不足、API 失败）一律当作"不在会中"。
+    /// 宁可多提醒一次，也不能悄悄失去全部提醒。
+    /// </summary>
+    internal static class MeetingDetector
+    {
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowTextLength(IntPtr hWnd);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+
+        // 测试设施：EYE_LITE_FAKE_MEETING=1 恒真、=0 恒假；未设 = -1（走真实检测）。
+        // 不设时只是一次静态字段读取，行为与没有这个钩子完全一致。
+        private static readonly int fake = ReadFake();
+
+        private static int ReadFake()
+        {
+            try
+            {
+                string v = Environment.GetEnvironmentVariable("EYE_LITE_FAKE_MEETING");
+                if (v == "1") return 1;
+                if (v == "0") return 0;
+            }
+            catch { }
+            return -1;
+        }
+
+        public static bool IsInMeeting(AppConfig cfg)
+        {
+            if (cfg == null || !cfg.MeetingGuardEnabled) return false;
+            if (fake >= 0) return fake == 1;
+
+            string[] procs = SplitList(cfg.MeetingProcesses);
+            string[] keys = SplitList(cfg.MeetingTitleKeywords);
+            if (procs.Length == 0) return false;
+
+            bool hit = false;
+            try
+            {
+                EnumWindowsProc cb = delegate (IntPtr h, IntPtr l)
+                {
+                    if (hit) return false;                 // 找到一个就收工
+                    try
+                    {
+                        if (!IsWindowVisible(h)) return true;
+                        if (GetWindowTextLength(h) <= 0) return true;
+
+                        uint pid;
+                        GetWindowThreadProcessId(h, out pid);
+                        if (pid == 0) return true;
+
+                        string name = ProcessNameOf(pid);
+                        if (name.Length == 0 || !InList(procs, name)) return true;
+
+                        if (keys.Length > 0)
+                        {
+                            StringBuilder sb = new StringBuilder(512);
+                            GetWindowText(h, sb, sb.Capacity);
+                            if (!ContainsAny(sb.ToString(), keys)) return true;
+                        }
+
+                        hit = true;
+                        return true;
+                    }
+                    catch { return true; }
+                };
+                EnumWindows(cb, IntPtr.Zero);
+            }
+            catch { return false; }
+            return hit;
+        }
+
+        private static string ProcessNameOf(uint pid)
+        {
+            try
+            {
+                using (System.Diagnostics.Process p = System.Diagnostics.Process.GetProcessById((int)pid))
+                {
+                    return p.ProcessName + ".exe";
+                }
+            }
+            catch { return ""; }
+        }
+
+        private static string[] SplitList(string s)
+        {
+            if (s == null || s.Length == 0) return new string[0];
+            string[] raw = s.Split(';');
+            List<string> keep = new List<string>();
+            for (int i = 0; i < raw.Length; i++)
+            {
+                string one = raw[i];
+                if (one == null) continue;
+                one = one.Trim();
+                if (one.Length > 0) keep.Add(one);
+            }
+            return keep.ToArray();
+        }
+
+        private static bool InList(string[] list, string name)
+        {
+            for (int i = 0; i < list.Length; i++)
+            {
+                if (string.Equals(list[i], name, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
+        private static bool ContainsAny(string text, string[] keys)
+        {
+            if (text == null || text.Length == 0) return false;
+            for (int i = 0; i < keys.Length; i++)
+            {
+                if (text.IndexOf(keys[i], StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            }
+            return false;
+        }
+    }
+
     internal static class NotificationState
     {
         [DllImport("shell32.dll", CharSet = CharSet.Auto)]
@@ -3147,6 +3281,15 @@ namespace EyeLite
         public bool ForegroundGuardEnabled = true;
         public string ForegroundWhitelist = "vlc.exe;potplayermini64.exe;wmplayer.exe;mpc-hc64.exe;obs64.exe";
 
+        // ---- 会议检测（C2）----
+        // 进程白名单 + 可见窗口 + 标题关键词，三条同时成立才算"在会中"。
+        // 默认开着，但**只在真的开会时**才抑制 —— 装了客户端不开会不该被抑制。
+        public bool MeetingGuardEnabled = true;
+        public string MeetingProcesses =
+            "Zoom.exe;Teams.exe;ms-teams.exe;wemeetapp.exe;Feishu.exe;DingTalk.exe";
+        // 会议窗口的标题通常含这些词；客户端主窗口（聊天/日程）不含，所以不会被误判。
+        public string MeetingTitleKeywords = "会议;Meeting;通话;Call;Webinar";
+
         // ---- C4：打字段检测（核心）----
         // 到点那一刻如果用户正在连续敲键（idle < 300ms），先让 5 秒，
         // 累计最多 60 秒。数据来源是 RawIdleMs()，与空闲计时同一口径。
@@ -3269,6 +3412,9 @@ namespace EyeLite
                         case "ForegroundWhitelist": c.ForegroundWhitelist = v; break;
                         case "TypingGuardEnabled": c.TypingGuardEnabled = v == "1"; break;
                         case "SittingOptionEnabled": c.SittingOptionEnabled = v == "1"; break;
+                        case "MeetingGuardEnabled": c.MeetingGuardEnabled = v == "1"; break;
+                        case "MeetingProcesses": c.MeetingProcesses = v == null ? "" : v.Trim(); break;
+                        case "MeetingTitleKeywords": c.MeetingTitleKeywords = v == null ? "" : v.Trim(); break;
                         case "Immersive": c.Immersive = v == "1"; break;
                         case "Plugin_Sound": c.Plugin_Sound = v == "1"; break;
                         case "Plugin_EdgeGlow": c.Plugin_EdgeGlow = v == "1"; break;
@@ -3333,6 +3479,9 @@ namespace EyeLite
                 sb.AppendLine("TypingGuardEnabled=" + (TypingGuardEnabled ? "1" : "0"));
                 sb.AppendLine("SittingOptionEnabled=" + (SittingOptionEnabled ? "1" : "0"));
                 sb.AppendLine("Immersive=" + (Immersive ? "1" : "0"));
+                sb.AppendLine("MeetingGuardEnabled=" + (MeetingGuardEnabled ? "1" : "0"));
+                sb.AppendLine("MeetingProcesses=" + (MeetingProcesses == null ? "" : MeetingProcesses));
+                sb.AppendLine("MeetingTitleKeywords=" + (MeetingTitleKeywords == null ? "" : MeetingTitleKeywords));
                 sb.AppendLine("Plugin_Sound=" + (Plugin_Sound ? "1" : "0"));
                 sb.AppendLine("Plugin_EdgeGlow=" + (Plugin_EdgeGlow ? "1" : "0"));
                 sb.AppendLine("Plugin_Ritual=" + (Plugin_Ritual ? "1" : "0"));
@@ -5202,6 +5351,7 @@ namespace EyeLite
         private long suppressNoticeAtMs = 0;    // 下次弹「已暂缓」横幅的时刻
         private bool suppressForced = false;    // 本轮连续抑制中是否已强制放行过
         private QunsState currentQuns = QunsState.NotForcedOn;
+        private bool inMeeting = false;        // 当前是否检测到"在会中"（仅用于托盘文案）
 
         // ---- C3/C4：到点前的"临门一脚"让路（核心功能）----
         //
@@ -5786,6 +5936,15 @@ namespace EyeLite
                         currentQuns = QunsState.NotForcedOn;
                     }
 
+                    // C2：会议检测也是一个抑制源，**复用同一套**"抑制 + 30 分钟强制放行"，
+                    // 不另造一套状态机 —— 两套抑制逻辑并存是 bug 的温床。
+                    inMeeting = false;
+                    if (cfg.MeetingGuardEnabled)
+                    {
+                        try { inMeeting = MeetingDetector.IsInMeeting(cfg); } catch { inMeeting = false; }
+                        if (inMeeting) blocked = true;
+                    }
+
                     if (blocked)
                     {
                         // 被抑制：保持原有计时状态，只是不提醒。
@@ -5827,7 +5986,7 @@ namespace EyeLite
                             try
                             {
                                 tray.ShowBalloonTip(4000, "护眼小助手",
-                                    "全屏 / 演示状态持续过久，已停止暂缓提醒。", ToolTipIcon.Info);
+                                    "全屏 / 演示 / 会议持续过久，已停止暂缓提醒。", ToolTipIcon.Info);
                             }
                             catch { }
                         }
@@ -6979,7 +7138,7 @@ namespace EyeLite
                     // 文案区分全屏与演示（NotifyIcon.Text 上限 63 字符，务必短）。
                     // suppressForced 为真时抑制已经放行（只是 QUNS 还没回到非抑制值），
                     // 此时再说"暂缓"就是撒谎 —— 让它落到下面的正常剩余时间文案。
-                    string reason = NotificationState.ReasonText(currentQuns);
+                    string reason = inMeeting ? "会议中，提醒暂缓" : NotificationState.ReasonText(currentQuns);
                     s = reason.Length > 0 ? reason : "提醒暂缓中";
                 }
                 else if (IsIdleTooLong()) s = "检测到离开，计时已暂停";
