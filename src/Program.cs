@@ -3157,6 +3157,13 @@ namespace EyeLite
         // 默认关 = 一个像素都不变。
         public bool SittingOptionEnabled = false;
 
+        // 沉浸模式：**照常计时，但一个窗口都不弹**（遮罩 / 预告 / 渐暗 / 辉光 / 仪式窗全都不出现）。
+        //
+        // 与「暂停计时」的区别（托盘菜单要把这两句写清楚）：
+        //   暂停   = 不记账，时间白给；
+        //   沉浸   = 记账，只是不打扰。用户明确说"我知道我在干嘛，别烦我"。
+        public bool Immersive = false;
+
         // ---- G11：动作演示的禁忌关键词（分号分隔，用户手填，如「腰椎;膝」）----
         //
         // 命中即**跳过该动作**（不是给提示、不是灰色显示）。理由：
@@ -3262,6 +3269,7 @@ namespace EyeLite
                         case "ForegroundWhitelist": c.ForegroundWhitelist = v; break;
                         case "TypingGuardEnabled": c.TypingGuardEnabled = v == "1"; break;
                         case "SittingOptionEnabled": c.SittingOptionEnabled = v == "1"; break;
+                        case "Immersive": c.Immersive = v == "1"; break;
                         case "Plugin_Sound": c.Plugin_Sound = v == "1"; break;
                         case "Plugin_EdgeGlow": c.Plugin_EdgeGlow = v == "1"; break;
                         case "Plugin_Ritual": c.Plugin_Ritual = v == "1"; break;
@@ -3324,6 +3332,7 @@ namespace EyeLite
                 sb.AppendLine("ForegroundWhitelist=" + ForegroundWhitelist);
                 sb.AppendLine("TypingGuardEnabled=" + (TypingGuardEnabled ? "1" : "0"));
                 sb.AppendLine("SittingOptionEnabled=" + (SittingOptionEnabled ? "1" : "0"));
+                sb.AppendLine("Immersive=" + (Immersive ? "1" : "0"));
                 sb.AppendLine("Plugin_Sound=" + (Plugin_Sound ? "1" : "0"));
                 sb.AppendLine("Plugin_EdgeGlow=" + (Plugin_EdgeGlow ? "1" : "0"));
                 sb.AppendLine("Plugin_Ritual=" + (Plugin_Ritual ? "1" : "0"));
@@ -5132,6 +5141,7 @@ namespace EyeLite
         private AppConfig cfg;
         private NotifyIcon tray;
         private ToolStripMenuItem miPause;
+        private ToolStripMenuItem miImmersive;
         private ToolStripMenuItem miAutoStart;
         private System.Windows.Forms.Timer timer;
 
@@ -5467,6 +5477,14 @@ namespace EyeLite
                 UpdateTrayText();
             };
             menu.Items.Add(miPomodoro);
+
+            // 沉浸模式：与「暂停」并列，但语义相反 —— 暂停不记账，沉浸记账。
+            // 文案必须点明这个区别，否则用户会以为两者一样，然后抱怨"时间没算"。
+            miImmersive = new ToolStripMenuItem("沉浸模式（照常计时，不打扰）");
+            miImmersive.CheckOnClick = true;
+            miImmersive.Checked = cfg.Immersive;
+            miImmersive.Click += delegate { SetImmersive(miImmersive.Checked); };
+            menu.Items.Add(miImmersive);
 
             // 托盘里也能开关插件。设置页「扩展」卡要点开设置才能改，而插件是"试一下"的东西，
             // 从托盘勾更快。走同一条 PluginHost.SetOn + cfg.Save 路径，失败回滚（见 TogglePluginFromTray）。
@@ -5867,17 +5885,33 @@ namespace EyeLite
                     // 下一个 tick 才被 gate 撤掉 —— 表现为"切全屏时闪一下变暗"。
                     // 放在这里时 blocked 已经算完：被压住的路径都 return 或 HideDim 过。
                     // DimTick 内部仍保留 resting / previewing / suppressed / paused 的判据做兜底。
-                    try { DimTick(); } catch { }
+                    // 沉浸模式下连"美化层"都不做：它们也是打扰（全屏压暗、边缘发光）。
+                    if (!cfg.Immersive)
+                    {
+                        try { DimTick(); } catch { }
 
-                    // ---- A1：边缘辉光（插件 EdgeGlow，与渐暗同一时机）----
-                    // 未启用时 PluginHost.Get 返回 null → 这里什么都不做，
-                    // 连窗口都不会被创建（"未启用零对象"的落点之一）。
-                    try { RefreshEdgeGlow(); } catch { }
+                        // ---- A1：边缘辉光（插件 EdgeGlow，与渐暗同一时机）----
+                        // 未启用时 PluginHost.Get 返回 null → 这里什么都不做，
+                        // 连窗口都不会被创建（"未启用零对象"的落点之一）。
+                        try { RefreshEdgeGlow(); } catch { }
+                    }
 
                     // ---- C3 / C4：到点前的"临门一脚"让路 ----
                     // 每 tick 只算一次（DeferredByActivity 内部会推进"连续命中"的计时）。
                     // 放在 gate 之后：被抑制的路径已经 return 过，没必要白跑一次进程查询。
                     bool deferred = DeferredByActivity(now);
+
+                    // ---- 沉浸模式：只记账，不打扰 ----
+                    // 位置很关键：在 gate 与"让路"之后（那两步决定"该不该打扰"），
+                    // 在预告 / 到点 / 统计之前（那三步都会弹窗或改计数）。
+                    // 累加器在上面已照常累加 —— 这正是它和「暂停」的区别。
+                    if (cfg.Immersive)
+                    {
+                        if (isPreviewing) EndPreview();
+                        RefreshRemaining();
+                        UpdateTrayText();
+                        return;
+                    }
 
                     // F1：「到点了却被让路」要累计到"忽略"（被抑制的那条路径在前面单独记）。
                     // 放在预告分支之前：预告里到点又被让路的提前 return 也被这句覆盖。
@@ -6935,7 +6969,8 @@ namespace EyeLite
             try
             {
                 string s;
-                if (paused) s = "已暂停 · 右键可恢复";
+                if (cfg.Immersive) s = "沉浸模式 · 照常计时，不打扰";
+                else if (paused) s = "已暂停 · 右键可恢复";
                 else if (isResting) s = "休息中 " + restRemaining + " 秒";
                 else if (isPreviewing) s = "即将休息 " + previewRemaining + " 秒";
                 else if (isSuppressed && !suppressForced)
@@ -7060,6 +7095,30 @@ namespace EyeLite
                 }
                 catch { }
             }
+        }
+
+        /// <summary>
+        /// 切换沉浸模式。
+        ///
+        /// 开启时必须**立刻**把已经挂着的载体收掉，不能等下一 tick：
+        /// 用户点完菜单还看着一块全屏遮罩，那就不叫"沉浸"。
+        /// </summary>
+        private void SetImmersive(bool on)
+        {
+            cfg.Immersive = on;
+            try { cfg.Save(); } catch { }
+
+            if (on)
+            {
+                try { if (isPreviewing) EndPreview(); } catch { }
+                try { if (isResting) EndRest(false); } catch { }   // 当作跳过：并没有真的休息过
+                try { HideDim(); } catch { }
+                try { HideEdgeGlow(); } catch { }
+                try { HideRitual(); } catch { }
+                try { HideMovement(); } catch { }
+            }
+
+            UpdateTrayText();
         }
 
         private void ShowSettings()
