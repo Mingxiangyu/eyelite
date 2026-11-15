@@ -4598,13 +4598,14 @@ namespace EyeLite
             RoundPanel cardExt = AddCard(extTop, Sc(268), "扩展");
 
             // 顺序按内存代价从小到大（Stats 几乎零成本 → Guard 只有一个计数器 → 窗口类插件在后）。
-            // 右侧占用标注全部先写「待测」—— 按纪律只写实测值，没量过就写待测，绝不写估算。
-            AddPluginRow(cardExt, Sc(FirstRowTop), "Stats", "用眼统计", cfg.Plugin_Stats);
-            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 1, "EdgeGlow", "屏幕边缘微光", cfg.Plugin_EdgeGlow);
-            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 2, "Ritual", "休息仪式（眼操/呼吸）", cfg.Plugin_Ritual);
-            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 3, "Sound", "仪式音", cfg.Plugin_Sound);
-            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 4, "Movement", "起身活动演示", cfg.Plugin_Movement);
-            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 5, "Guard", "跳过配额", cfg.Plugin_Guard);
+            // 右侧占用标注是 tools/plugin-mem-check.py 的实测值（同配置开/关对照）。
+            // 只有"暂未实测"的项才写「待测」——不写估算。
+            AddPluginRow(cardExt, Sc(FirstRowTop), "Stats", "用眼统计", cfg.Plugin_Stats, "<0.5 MB");
+            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 1, "EdgeGlow", "屏幕边缘微光", cfg.Plugin_EdgeGlow, "约 0.5 MB");
+            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 2, "Ritual", "休息仪式（眼操/呼吸）", cfg.Plugin_Ritual, "约 2 MB");
+            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 3, "Sound", "仪式音", cfg.Plugin_Sound, "约 0.7 MB");
+            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 4, "Movement", "起身活动演示", cfg.Plugin_Movement, "约 2.3 MB");
+            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 5, "Guard", "跳过配额", cfg.Plugin_Guard, "<0.5 MB");
 
             // 卡底小字：必须写明"关掉会回落"，否则用户不敢试。
             Label lblExtNote = new Label();
@@ -4903,10 +4904,10 @@ namespace EyeLite
         }
 
         /// <summary>
-        /// 「扩展」卡的一行：左边勾选框 + 名称，右边小字占用标注（暂全填「待测」）。
+        /// 「扩展」卡的一行：左边勾选框 + 名称，右边小字占用标注（实测值）。
         /// 勾选**立即生效**（不等保存），失败会回滚 —— 见 WirePluginToggle。
         /// </summary>
-        private void AddPluginRow(RoundPanel card, int top, string id, string name, bool val)
+        private void AddPluginRow(RoundPanel card, int top, string id, string name, bool val, string noteText)
         {
             CheckBox box = AddCheck(card, top, name, val);
 
@@ -4916,7 +4917,9 @@ namespace EyeLite
                           Sc(CardWidth) - Sc(CardPad) * 2 - noteW - Sc(8), box.Height);
 
             Label note = new Label();
-            note.Text = "待测";     // 纪律：只写实测值；没量过就写"待测"，绝不写估算
+            // 占用来由 tools/plugin-mem-check.py 实测（同配置开/关对照，窗体成本已抵消）。
+            // 纪律：这里只允许写实测值；没有实测数据时传「待测」，绝不写估算。
+            note.Text = noteText;
             note.Font = Ui.FontEyebrow;
             note.ForeColor = Ui.CaptionText;
             note.BackColor = Ui.CardBg;

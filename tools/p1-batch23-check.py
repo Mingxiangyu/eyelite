@@ -1075,27 +1075,52 @@ def case_e1(base_orig, results):
 
 
 def case_settings(results):
-    """设置页「扩展」卡：只观察已打开的设置窗（不自己开窗，避免抢前台）。"""
-    print('\n--- 设置页「扩展」卡（只观察已打开的窗口）---')
+    """设置页「扩展」卡：**只观察已打开的窗口**。
+
+    为什么不能自己开窗（这条是踩过的坑）：
+      本程序没有"二次启动打开设置页"的行为。第二次启动只会弹一个
+      364x163 的提示框「护眼小助手已经在运行了，请看任务栏右下角托盘」。
+      我一度把这个提示框当成设置页（标题同为"护眼小助手"），
+      以为可以自动化，实际枚举不到「扩展」。
+    真正打开设置页只有"点托盘图标"一条路，而托盘图标在 Win11 上可能被折叠进
+    溢出面板，用 TB_ 消息点击极不稳定，且会抢前台 —— 违反本批纪律。
+    所以：**请手动打开设置页，然后单独跑 settings 项**。
+    """
+    print('')
+    print('--- 设置页「扩展」卡（只观察已打开的窗口）---')
     cand = []
     for hwnd, w, h, pid in own_windows():
-        if pid in _pid_cache and w > 400 and h > 300 and not overlay_windows():
-            texts = child_texts(hwnd)
-            if any('扩展' in t for t in texts):
-                cand.append((hwnd, w, h, texts))
+        if w < 500 or h < 400:        # 排除 364x163 的"已在运行"提示框
+            continue
+        texts = child_texts(hwnd)
+        if any('扩展' in t for t in texts):
+            cand.append((hwnd, w, h, texts))
+
     if not cand:
-        print('  没有找到已打开的设置窗 → 不自己开窗（会抢前台，违反纪律）')
+        print('  没有找到设置页 → 不自动开窗（二次启动只会弹提示框，不会开设置页）')
         results.append(('设置页扩展卡', None,
-                        'SKIP 需要先手动打开设置页再重跑本项'
-                        '（枚举不到含「扩展」的设置窗）'))
+                        'SKIP 请手动打开设置页后重跑本项（无自动化路径）'))
         return
+
     hwnd, w, h, texts = cand[0]
-    plugins = [t for t in texts if t in ('Stats', 'EdgeGlow', 'Ritual', 'Movement',
-                                         'Guard', 'Sound')]
+    names = [t for t in texts if t in ('Stats', 'EdgeGlow', 'Ritual',
+                                       'Movement', 'Guard', 'Sound')]
+    measured = [t for t in texts if 'MB' in t]
     pending = [t for t in texts if '待测' in t]
-    ok = bool(plugins) and bool(pending)
+    cards = [t for t in ('节奏', '番茄钟', '久坐与活动', '行为') if any(t in x for x in texts)]
+
+    print('  设置窗 %dx%d；插件名=%s' % (w, h, names))
+    print('  占用标注=%s' % merged_notes(measured))
+    print('  仍有「待测」=%d 处；已有卡片=%s' % (len(pending), cards))
+
+    ok = (len(names) >= 6) and bool(measured) and not pending and len(cards) >= 3
     results.append(('设置页扩展卡', ok,
-                    '窗口 %dx%d；插件名=%s；「待测」标注 %d 处' % (w, h, plugins, len(pending))))
+                    '窗口 %dx%d；插件名 %d 个；占用标注 %d 个；待测 %d 处；已有卡片 %d 张'
+                    % (w, h, len(names), len(measured), len(pending), len(cards))))
+
+
+def merged_notes(items):
+    return items[:8]
 
 
 # ---------------------------------------------------------------- main
