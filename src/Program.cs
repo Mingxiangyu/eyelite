@@ -6131,7 +6131,21 @@ namespace EyeLite
                     // 读一次 Handle 就会强制创建 HWND 与全部子控件句柄，且不会让窗口可见。
                     for (int wi = 0; wi < restForms.Count; wi++)
                     {
-                        try { IntPtr h = restForms[wi].Handle; } catch { }
+                        // 句柄还不够：分层窗口的 DWM 表面是在第一次 Show() 时才建的。
+                        // 所以再以**透明度 0** Show 一次再藏起来 —— 全程不可见，但把这块开销也挪到启动时。
+                        RestForm rf = restForms[wi];
+                        double keep = rf.Opacity;
+                        try
+                        {
+                            rf.Opacity = 0.0;
+                            rf.Show();
+                            rf.Hide();
+                        }
+                        catch { }
+                        finally
+                        {
+                            try { rf.Opacity = keep; } catch { }
+                        }
                     }
                 }
 
