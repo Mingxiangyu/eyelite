@@ -117,20 +117,30 @@ namespace EyeLite
             if (r.Width <= 0 || r.Height <= 0) return;
             try
             {
-                Color outer = Color.FromArgb(color.A, color);
-                Color mid = Color.FromArgb((int)(color.A * 0.34f), color);
-                Color inner = Color.FromArgb(0, color);
-
-                Color[] cols = reverse
-                    ? new Color[] { inner, mid, outer }
-                    : new Color[] { outer, mid, inner };
-
-                using (LinearGradientBrush br = new LinearGradientBrush(r, cols[0], cols[2], mode))
+                // 采样 10 个点，按 (1-t)^2 衰减，**内缘精确为 0**。
+                //
+                // 为什么不是三档（满 / 34% / 0）：
+                //   三档在外侧留了一段"平台"，视觉上就是"一条实心边 + 突然消失"，
+                //   用户反馈"前两档没感觉"。真正的羽化要求亮度在整条带子上连续下降，
+                //   并且在靠近屏幕内侧时彻底消失，不能有一条看得见的终止线。
+                const int Stops = 10;
+                Color[] cols = new Color[Stops];
+                float[] pos = new float[Stops];
+                for (int i = 0; i < Stops; i++)
                 {
-                    ColorBlend blend = new ColorBlend(3);
+                    float t = i / (float)(Stops - 1);          // 0 = 外缘，1 = 内缘
+                    double a = (1.0 - t) * (1.0 - t);          // 平方衰减，末端自然收敛
+                    int alpha = (int)(color.A * a + 0.5);
+                    cols[i] = Color.FromArgb(alpha, color);
+                    pos[i] = t;
+                }
+                if (reverse) Array.Reverse(cols);              // 只翻颜色，位置仍严格 0→1
+
+                using (LinearGradientBrush br = new LinearGradientBrush(r, cols[0], cols[Stops - 1], mode))
+                {
+                    ColorBlend blend = new ColorBlend(Stops);
                     blend.Colors = cols;
-                    // 0.62 而不是 0.5：让"亮"的部分集中在外侧 2/5，内侧是长尾
-                    blend.Positions = new float[] { 0f, 0.62f, 1f };
+                    blend.Positions = pos;
                     br.InterpolationColors = blend;
                     g.FillRectangle(br, r);
                 }
@@ -1494,7 +1504,7 @@ namespace EyeLite
     // 呼吸只改整窗 Opacity（0.05 ↔ 0.35，3 秒一个来回），不重画、不缓存任何位图。
     internal class EdgeGlowForm : Form
     {
-        private const int BandDefault = 26;     // 96dpi 下的边带厚度（6 太窄，看不出是光）
+        private const int BandDefault = 52;     // 96dpi 下的边带厚度（26 仍偏窄，再翻一倍）
 
         private int band = BandDefault;
         private float dpiScale = 1f;
@@ -1618,9 +1628,14 @@ namespace EyeLite
     internal class EdgeGlowPlugin : IEyeLitePlugin
     {
         private const int TickMs = 100;             // 呼吸刷新间隔
-        private const double PeriodMs = 3000.0;     // 一个来回 3 秒
-        private const double AlphaMin = 0.05;
-        private const double AlphaMax = 0.35;
+        private const double PeriodMs = 3000.0;     // 呼吸一个来回 3 秒（慢，负责"有生命感"）
+        private const double AlphaMin = 0.08;
+        private const double AlphaMax = 0.34;
+        // 闪烁：叠加一个 1Hz 的正弦（PeriodMs 的三分之一，即 1 秒一个来回），幅度小但看得见。
+        // 为什么不用随机闪烁：100ms 刷新下随机会变成"跳变"，看着像接触不良；
+        // 固定频率的叠加才是"呼吸 + 微闪"，而且可预测、不刺眼。
+        private const double ShimmerDepth = 0.12;
+        private const double ShimmerRatio = 3.0;
 
         private bool enabled;
         private List<EdgeGlowForm> forms;
@@ -1727,8 +1742,14 @@ namespace EyeLite
         /// <summary>余弦呼吸：0→1→0 平滑，三角波太机械。</summary>
         private double CurrentAlpha()
         {
+            // 呼吸（3 秒一周期）
             double k = 0.5 - 0.5 * Math.Cos(2.0 * Math.PI * phase);
-            return AlphaMin + (AlphaMax - AlphaMin) * k;
+            double a = AlphaMin + (AlphaMax - AlphaMin) * k;
+            // 微闪（1 秒一周期）：只叠加、不替换，所以"慢呼吸"的骨架还在
+            double shimmer = 0.5 + 0.5 * Math.Sin(2.0 * Math.PI * phase * ShimmerRatio);
+            a += ShimmerDepth * shimmer;
+            if (a > 0.62) a = 0.62;     // 上限：再高就不是"微光"而是"泛白"
+            return a;
         }
 
         private void StartTimer()
@@ -4310,7 +4331,7 @@ namespace EyeLite
         // 恰好形成"轻微暗 → 只是有点暖边；接近到点 → 边缘明显发光"的渐进暗示。
         //
         // 静态图案，只在首次绘制时画一次：不缓存位图、不建 Timer、不重绘路径。
-        private const int GlowBandDefault = 18;     // 96dpi 下的光带厚度（与 A1 同一观感）
+        private const int GlowBandDefault = 36;     // 96dpi 下的光带厚度（与 A1 同步翻倍）
 
         private float dpiScale = 1f;
         private double lastAlpha = 0.0;             // 当前档位（决定要不要画右下角小字）
