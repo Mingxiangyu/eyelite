@@ -4330,7 +4330,9 @@ namespace EyeLite
             lblCount.TextAlign = ContentAlignment.MiddleRight;
             lblCount.AutoSize = false;
             lblCount.BackColor = Color.Transparent;
-            lblCount.SetBounds(w - Sc(96), Sc(12), Sc(56), Sc(44));
+            // 高度必须容得下 Sc(38) 的字号：150% 下该字号行高约 89px，
+            // 而原来只给了 Sc(44)（66px）—— 数字下半截就是这么被裁掉的。
+            lblCount.SetBounds(w - Sc(96), -Sc(2), Sc(56), Sc(72));
             this.Controls.Add(lblCount);
 
             lblCountUnit = new Label();
@@ -4340,7 +4342,7 @@ namespace EyeLite
             lblCountUnit.TextAlign = ContentAlignment.MiddleLeft;
             lblCountUnit.AutoSize = false;
             lblCountUnit.BackColor = Color.Transparent;
-            lblCountUnit.SetBounds(w - Sc(38), Sc(24), Sc(24), Sc(20));
+            lblCountUnit.SetBounds(w - Sc(38), Sc(40), Sc(24), Sc(20));
             this.Controls.Add(lblCountUnit);
 
             // ---- 说明文案 ----
@@ -5387,6 +5389,29 @@ namespace EyeLite
         private QunsState currentQuns = QunsState.NotForcedOn;
         private bool inMeeting = false;        // 当前是否检测到"在会中"（仅用于托盘文案）
 
+        // 预告窗口的绝对到期时刻（0 = 当前没有预告）。
+        // 显示用它反算剩余秒数，避免 tick 抖动导致数字跳变。
+        private long previewDueMs = 0;
+
+        // 200ms 的 UI 刷新：只在"休息中 / 预告中"干活。
+        // 为什么需要它：1 秒一次的 tick 一旦被系统合并，倒计时会一次掉 2 秒；
+        // 有了它，数字每 200ms 从绝对时刻重算，即使 tick 迟到也不会跳。
+        private System.Windows.Forms.Timer fastUi;
+
+        // 测试设施：EYE_LITE_TRACE_UI=<文件> 时，把每秒实际显示给用户的剩余秒数追加进去。
+        // 为什么需要它：遮罩上的倒计时是**画在环里的**，没有控件文本可读，
+        // 外部探针无法验证"有没有跳数"。不设环境变量时只有一次空判断，零 IO。
+        private static readonly string TraceUiFile = ReadTraceUi();
+        private static string ReadTraceUi()
+        {
+            try
+            {
+                string v = Environment.GetEnvironmentVariable("EYE_LITE_TRACE_UI");
+                return v == null ? "" : v.Trim();
+            }
+            catch { return ""; }
+        }
+
         // ---- C3/C4：到点前的"临门一脚"让路（核心功能）----
         //
         // 两套让路各自计时、互不覆盖：最终截止时刻取**较大**的那个，
@@ -5720,6 +5745,19 @@ namespace EyeLite
             timer.Interval = 1000;
             timer.Tick += OnTick;
             timer.Start();
+
+            fastUi = new System.Windows.Forms.Timer();
+            fastUi.Interval = 200;
+            fastUi.Tick += delegate
+            {
+                try
+                {
+                    if (isResting) UpdateRestUI();
+                    else if (isPreviewing) UpdatePreviewCountdown();
+                }
+                catch { }
+            };
+            fastUi.Start();
 
             // 测试设施（见 OpenSettingsOnStart）。用 Post 而不是直接调：
             // 构造期消息循环还没起来，ShowDialog 会把初始化卡住。
@@ -6679,6 +6717,7 @@ namespace EyeLite
             if (!isPreviewing) return;
             isPreviewing = false;
             previewRemaining = 0;
+            previewDueMs = 0;              // 下次预告重新取基准
             try { if (previewForm != null) previewForm.HidePreview(); } catch { }
         }
 
@@ -6701,7 +6740,13 @@ namespace EyeLite
             }
             if (left < 0) left = 0;
 
-            int sec = (int)((left + 999) / 1000);
+            // 预告的剩余秒数同样用**绝对到期时刻**算：previewStartMs + left。
+            // 只看累加器的话，tick 被系统合并时会一次掉 2 秒，看起来像卡顿。
+            if (previewDueMs <= 0) previewDueMs = Clock.NowMs() + left;
+            long leftAbs = previewDueMs - Clock.NowMs();
+            if (leftAbs < 0) leftAbs = 0;
+
+            int sec = (int)((leftAbs + 999) / 1000);
             if (sec != previewRemaining)
             {
                 previewRemaining = sec;
@@ -6743,6 +6788,39 @@ namespace EyeLite
         /// false 表示护眼/番茄钟休息，时长取 RestTotalSeconds。
         /// 两条路走的是**同一个**状态机与遮罩，只是时长、文案与配色不同。
         /// </summary>
+        // ---- 「找东西」的提示池 ----
+        //
+        // 一次给一句、每轮随机，且**不与上一轮重复**（随机但保证变化）。
+        // 为什么不用"按轮次索引轮换"：那版实测 3 轮拿到 0/0/1（会跳拍），
+        // 没能在合理时间内定位；随机 + 去重 既能保证不重复，也不依赖任何计数器。
+        //
+        // 文案刻意"不写实"：不指定具体物品的位置，让人真的抬头去找，而不是盯着屏幕想。
+        private static readonly string[] EyeGameHints = new string[]
+        {
+            "让眼睛离开屏幕：看看 6 米外，或在房间里找 3 样蓝色的东西",
+            "找一个你平时没注意过的角落，认真看 5 秒",
+            "数一数房间里有多少样会反光的东西",
+            "找 2 样圆的东西，再把视线放到最远的那面墙上",
+            "看看窗外最远的那栋楼，数一数它有几层",
+            "找一样比手掌小的东西，看清它的边缘",
+            "找一个绿色以外、又不像灰色的东西，看 3 秒",
+            "看看房间里最暗的那个角落，等它变清楚"
+        };
+
+        private static readonly Random eyeGameRnd = new Random();
+        private int lastEyeGameHint = -1;
+
+        private string EyeGameHint()
+        {
+            int n = EyeGameHints.Length;
+            if (n <= 1) return EyeGameHints[0];
+
+            int pick;
+            do { pick = eyeGameRnd.Next(n); } while (pick == lastEyeGameHint);
+            lastEyeGameHint = pick;
+            return EyeGameHints[pick];
+        }
+
         private void BeginRest(bool bodyBreak)
         {
             // ---- p0a 追踪：理论到期时刻 vs 实际开始时刻 ----
@@ -6814,9 +6892,7 @@ namespace EyeLite
                 // 没能定位。**行为不明的功能不发布** —— 退回一句固定文案，
                 // 用户要求的是"挂到普通护眼休息"，不是"必须轮换"。
                 // 也不做成屏幕上的动画：护眼休息要眼睛离开屏幕，动画等于把视线钉回来。
-                hint = cfg.EyeGameEnabled
-                    ? "让眼睛离开屏幕：看看 6 米外，或在房间里找 3 样蓝色的东西"
-                    : "让眼睛看看 6 米外的东西，放松睫状肌";
+                hint = cfg.EyeGameEnabled ? EyeGameHint() : "让眼睛看看 6 米外的东西，放松睫状肌";
             }
 
             bool pomo = bodyBreak ? false : cfg.PomodoroEnabled;   // 身体休息不用番茄钟配色
@@ -7160,8 +7236,22 @@ namespace EyeLite
 
         private void UpdateRestUI()
         {
+            // 用**绝对到期时刻**算剩余，而不是信任"每秒减一"：
+            // tick 被系统合并时会一次减 2，用户看到 8 直接跳到 6 —— 感觉像卡顿。
+            // 改成从 restDueMs 反算之后，无论 tick 什么时候来，数字都是真实的剩余秒数。
+            long leftMs = restDueMs - Clock.NowMs();
+            int leftSec = (int)((leftMs + 999L) / 1000L);
+            if (leftSec < 0) leftSec = 0;
+            restRemaining = leftSec;
+
             if (restRemaining == lastShown) return;
             lastShown = restRemaining;
+
+            if (TraceUiFile.Length > 0)
+            {
+                try { File.AppendAllText(TraceUiFile, leftSec.ToString() + Environment.NewLine, new UTF8Encoding(false)); }
+                catch { }
+            }
             for (int i = 0; i < restForms.Count; i++)
             {
                 try { restForms[i].UpdateView(restRemaining, restTotalSeconds); }
@@ -7700,6 +7790,7 @@ namespace EyeLite
         private void ExitApp()
         {
             try { timer.Stop(); } catch { }
+            try { if (fastUi != null) fastUi.Stop(); } catch { }
             KeyboardGuard.Uninstall();
             KeyboardGuard.OnSkipKey = null;
             EndPreview();
