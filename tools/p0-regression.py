@@ -125,7 +125,12 @@ TESTS = [
     ('p0b 预告 5 例',       'tools/p0b-preview-check.py', [], {}),   # T1 断言 50±4s，不压
     ('p0b 三出口',          'tools/p0b-exits-check.py', [], {}),
     ('p0a2 A2/A3 + 内存',   'tools/p0a2-a3-check.py', [],
-     {'EYE_LITE_FAKE_WORK_MS': '119000'}),         # MEM/GDI 仍真等 180s；A2 三项布尔
+     # **不注入 EYE_LITE_FAKE_WORK_MS**。
+     # A2 的三条用例断言的是"压暗层先出现、遮罩后出现"，它的时间轴来自真实的 60 秒窗口；
+     # 注入钩子会把压暗层提前到 1 秒，同时编排层又把 config 覆盖成 WorkMinutes=1，
+     # 两者叠加会把前提改掉 —— 实测因此产生过一次假 FAIL（单独跑 6/6，编排里 5/6）。
+     # 这项本来就是最慢的一项（MEM/GDI 要真等 180s + 380s），压它省不下多少，不值得冒判据失真的风险。
+     {}),
     ('p0d 空闲计时',        'tools/p0d-idle-check.py', [], {}),      # 断言 58.7s 左右，不压
 ]
 
