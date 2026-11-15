@@ -49,13 +49,28 @@ BASE_CFG = {
     'CameraCountEnabled': '0',
     'SuppressOnFullscreen': '1',
     'DimAlphaMax': '45',
+    # P1 新增键：**默认全部关掉**。
+    # 理由：C3（前台白名单）/ C4（打字段）都会让遮罩出现时刻偏离 60s，
+    # 而 P0 回归量的是核心行为。守卫由 tools/p1-batch1-check.py 单独验证。
+    'ForegroundGuardEnabled': '0',
+    'TypingGuardEnabled': '0',
+    'SittingOptionEnabled': '0',
+    'Plugin_Sound': '0',
+    'Plugin_EdgeGlow': '0',
+    'Plugin_Ritual': '0',
+    'Plugin_Stats': '0',
+    'Plugin_Movement': '0',
+    'Plugin_Guard': '0',
 }
 
 ORDER = ['WorkMinutes', 'RestSeconds', 'PomodoroEnabled', 'PomodoroWork',
          'PomodoroRest', 'AllowSkip', 'PostponeMinutes', 'IdleMinutes',
          'SoundEnabled', 'StrictMode', 'StartWithWindows', 'PreviewSeconds',
          'SedentaryEnabled', 'SedentaryMinutes', 'SedentarySeconds',
-         'CameraCountEnabled', 'SuppressOnFullscreen', 'DimAlphaMax']
+         'CameraCountEnabled', 'SuppressOnFullscreen', 'DimAlphaMax',
+         'ForegroundGuardEnabled', 'TypingGuardEnabled', 'SittingOptionEnabled',
+         'Plugin_Sound', 'Plugin_EdgeGlow', 'Plugin_Ritual', 'Plugin_Stats',
+         'Plugin_Movement', 'Plugin_Guard']
 
 
 def md5(path):

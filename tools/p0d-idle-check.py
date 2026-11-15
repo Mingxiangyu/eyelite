@@ -236,6 +236,17 @@ def read_cfg():
 
 
 def write_cfg(d):
+    # 关掉 P1 的两个实验性守卫（必须，否则本组用例会自相矛盾）。
+    #
+    # 为什么：D-1/D-2 用 EYE_LITE_FAKE_IDLE_MS 伪造空闲时长，而 C4（打字段）的判据
+    # 恰恰是 "idle < 300ms → 到点延后"。于是：
+    #   · D1a 对照组写 FAKE_IDLE_MS=0（假装"人就在"）→ idle 恒为 0 → C4 一直判"正在打字"
+    #     → 遮罩被一路延后（累计封顶 60s）→ 对照组不弹 → 整条用例失去判别力
+    # 实测就栽在这里：p0d 报了 "对照组未按时弹出"。
+    # 本组验证的是"空闲时长如何记账"，守卫行为由 tools/p1-batch1-check.py 单独验证。
+    d = dict(d)
+    d['ForegroundGuardEnabled'] = '0'
+    d['TypingGuardEnabled'] = '0'
     if not os.path.isdir(CFG_DIR):
         os.makedirs(CFG_DIR)
     order = ['WorkMinutes', 'RestSeconds', 'PomodoroEnabled', 'PomodoroWork',

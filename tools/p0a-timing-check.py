@@ -220,6 +220,16 @@ def read_cfg():
 
 
 def write_cfg(d):
+    # 关掉 P1 的两个实验性守卫。
+    #
+    # 为什么：C4（打字段）的判据是 idle<300ms → 到点延后 5s、累计 60s；
+    # C3（前台白名单）命中即延后 60s。两者都会让"遮罩出现时刻"偏离 60s，
+    # 而本脚本量的是**计时精度**，不是守卫行为。守卫由 tools/p1-batch1-check.py 单独验证。
+    # 踩过一次：p0d 的对照组用 EYE_LITE_FAKE_IDLE_MS=0 伪造"人就在"，
+    # 结果 idle 恒为 0 → C4 一直判"正在打字" → 遮罩被推到 60s 之后，对照组直接失效。
+    d = dict(d)
+    d['ForegroundGuardEnabled'] = '0'
+    d['TypingGuardEnabled'] = '0'
     if not os.path.isdir(CFG_DIR):
         os.makedirs(CFG_DIR)
     with open(CFG, 'w', encoding='utf-8') as f:

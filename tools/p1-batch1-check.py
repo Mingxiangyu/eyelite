@@ -160,6 +160,54 @@ def enum_children(hwnd):
     return out
 
 
+def process_name_of_pid(pid):
+    """pid → basename，取不到返回 None。"""
+    if not pid:
+        return None
+    h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wt.DWORD(1024)
+        if not kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return None
+        return os.path.basename(buf.value)
+    finally:
+        kernel32.CloseHandle(h)
+
+
+def candidate_process_names(limit=10):
+    """收集"可能成为前台"的进程名集合 = 当前前台 + 所有拥有可见窗口的进程。
+
+    为什么需要它（踩过一次）：
+      产品只在**临近到点**才查前台进程（IsNearDue 为真时），而无人值守跑脚本时
+      前台会自己漂移（实测 WorkBuddy.exe → chrome.exe，第 0.0s 就变了）。
+      只写单个进程名时，用例会退化成"环境不成立 SKIP"，
+      而这**测不出功能有没有做到**。
+
+    白名单本来就支持多值（分号分隔），所以填"真实的候选集合"：
+    判据仍然严格是「前台在白名单内 → 不打扰」，只是把"用户可能切到哪些窗口"
+    如实写进去，消除了前台漂移造成的假 SKIP。
+    """
+    names = []
+    _h, fg_name, _f = foreground_info()
+    if fg_name:
+        names.append(normalize_whitelist_name(fg_name))
+    seen = set()
+    for t in list_windows():
+        pid = t[3]
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        n = normalize_whitelist_name(process_name_of_pid(pid))
+        if n and n not in names:
+            names.append(n)
+        if len(names) >= limit:
+            break
+    return names
+
+
 def list_windows():
     out = []
 
@@ -461,10 +509,15 @@ def case_c3(base, results, whitelist_mode='process'):
     if not fg_name:
         print('  取不到前台进程名 → 仪器不成立，跳过 C3')
         return None
-    # 口径：basename + 扩展名，大小写不敏感；多项用 ';' 分隔（本用例只放一项）
-    wl = normalize_whitelist_name(fg_name if whitelist_mode == 'process'
-                                  else (fg_full or fg_name))
-    print('  白名单将写入：%r' % wl)
+    # 口径：basename + 扩展名，大小写不敏感；多项用 ';' 分隔。
+    # 默认填"候选集合"而不是单个进程 —— 见 candidate_process_names() 的说明。
+    if whitelist_mode == 'path':
+        wl = normalize_whitelist_name(fg_full or fg_name)
+    else:
+        cands = [c for c in candidate_process_names() if c]
+        wl = ';'.join(cands) if cands else normalize_whitelist_name(fg_name)
+    wl_set = set(x.strip().lower() for x in wl.split(';') if x.strip())
+    print('  白名单将写入：%r（%d 项）' % (wl, len(wl_set)))
 
     # ---- 对照组：白名单为空 → 必须 ≈60s 弹 ----
     if not stop_eyelite():
@@ -505,8 +558,8 @@ def case_c3(base, results, whitelist_mode='process'):
             ov = time.time() - t0
             break
         _h, cur, _f = foreground_info()
-        # 偏离判定也要大小写不敏感，与产品侧比对口径一致
-        if cur and cur.lower() != fg_name.lower() and deviated is None:
+        # 偏离判定也要大小写不敏感，且要对**整个白名单集合**比（白名单是多值的）
+        if cur and cur.lower() not in wl_set and deviated is None:
             deviated = (time.time() - t0, cur)
         time.sleep(0.1)
     still = alive(proc.pid)
