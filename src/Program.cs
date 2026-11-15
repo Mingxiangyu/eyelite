@@ -5847,6 +5847,18 @@ namespace EyeLite
                 {
                     restFormsWarmed = true;
                     try { EnsureRestForms(); } catch { }
+
+                    // **连窗口句柄一起预热**。
+                    //
+                    // EnsureRestForms 只 new 了 Form 对象，真正的 HWND 要等第一次 Show() 才创建，
+                    // 而 Show() 正发生在 BeginRest 里 —— 也就是"该弹遮罩的那一刻"。
+                    // 这台机器在长时间空闲后，两块全屏 layered 窗口的句柄创建 + 首次合成
+                    // 能让提醒整体晚 3~4 秒（实测中位数从 60.6 漂到 63.6）。
+                    // 读一次 Handle 就会强制创建 HWND 与全部子控件句柄，且不会让窗口可见。
+                    for (int wi = 0; wi < restForms.Count; wi++)
+                    {
+                        try { IntPtr h = restForms[wi].Handle; } catch { }
+                    }
                 }
 
                 // ---- A2：休息前 60 秒的渐进降饱和（每 tick 一次）----
