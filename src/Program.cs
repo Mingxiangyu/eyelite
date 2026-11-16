@@ -5603,6 +5603,26 @@ namespace EyeLite
             catch { return ""; }
         }
 
+        // 测试设施：EYE_LITE_FAKE_ACTION=<动作名>（如 扩胸 / 起身伸展）时，启动即**只播这一个动作**。
+        //
+        // 为什么需要它：EYE_LITE_FAKE_ROUTINE 只认例程名（颈/肩/腰/腕），
+        // 要验「扩胸」的对称性就得"在肩例程里等到第 22 秒" —— 动作顺序或时长一调整，
+        // 验证立刻失效。单独播一个动作，验证点就与时序解耦了。
+        //
+        // 与 FakeRoutine 同时设置时**以 ROUTINE 为准**（见 ctor 尾部：先判 Routine，再 else if Action）。
+        // 不设时零影响（空串 → 一次长度判断）。
+        private static readonly string FakeAction = ReadFakeAction();
+
+        private static string ReadFakeAction()
+        {
+            try
+            {
+                string v = Environment.GetEnvironmentVariable("EYE_LITE_FAKE_ACTION");
+                return v == null ? "" : v.Trim();
+            }
+            catch { return ""; }
+        }
+
         // 测试设施：EYE_LITE_TRACE_UI=<文件> 时，把每秒实际显示给用户的剩余秒数追加进去。
         // 为什么需要它：遮罩上的倒计时是**画在环里的**，没有控件文本可读，
         // 外部探针无法验证"有没有跳数"。不设环境变量时只有一次空判断，零 IO。
@@ -5615,6 +5635,38 @@ namespace EyeLite
                 return v == null ? "" : v.Trim();
             }
             catch { return ""; }
+        }
+
+        // ---- 测试设施：A/B 实验用的两个"闸托盘"开关 ----
+        //
+        // **这是测试设施，不是功能开关。生产环境禁设；不设时两条路径与现在逐字节一致**
+        // （缺省 false → 两个 if 都不成立 → 一次分支判断，零 I/O）。与契约 §10.6 同一口径。
+        //
+        // 背景：用户报"预告横幅倒数到 2 卡了近 3 秒"。假设是托盘更新把 UI 线程顶住了 ——
+        // `tray.Text = ...` / `tray.Icon = ...` 最终都走 Shell_NotifyIcon，
+        // 那是对 explorer 的**同步**调用，explorer 忙时会顶住调用方。
+        // 一个 tick 里可能连发两次（tooltip + 进度图标），所以闸门要分两档，
+        // 只闸一半容易测出"卡顿减半但不消失"，然后被误读成"假设不成立"。
+        //
+        // 用法：A/B 时分别设 EYE_LITE_NO_TRAY_TEXT=1 / EYE_LITE_NO_TRAY_ICON=1，
+        // 用 EYE_LITE_TRACE_UI 的 P 行间距判断 UI 线程有没有被顶住。
+        private static readonly bool NoTrayText = ReadEnvFlag("EYE_LITE_NO_TRAY_TEXT");
+        private static readonly bool NoTrayIcon = ReadEnvFlag("EYE_LITE_NO_TRAY_ICON");
+
+        /// <summary>环境变量开关：1 / true / yes（不分大小写）= 开；其余/缺失/异常 = 关。</summary>
+        private static bool ReadEnvFlag(string name)
+        {
+            try
+            {
+                string v = Environment.GetEnvironmentVariable(name);
+                if (string.IsNullOrEmpty(v)) return false;
+                v = v.Trim();
+                if (v == "1") return true;
+                if (string.Equals(v, "true", StringComparison.OrdinalIgnoreCase)) return true;
+                if (string.Equals(v, "yes", StringComparison.OrdinalIgnoreCase)) return true;
+                return false;
+            }
+            catch { return false; }
         }
 
         // ---- C3/C4：到点前的"临门一脚"让路（核心功能）----
@@ -5987,9 +6039,16 @@ namespace EyeLite
             // 测试设施：EYE_LITE_FAKE_ROUTINE=颈|肩|腰|腕 时，启动即播该例程。
             // 用途：自动化验证"例程能弹窗、能按顺序推进、播完自动收窗"，
             // 否则只能靠人手点托盘菜单。不设时零影响。
+            //
+            // EYE_LITE_FAKE_ACTION=<动作名> 时只播那一个动作（见 ShowSingleAction）。
+            // 两个都设时**以 ROUTINE 为准**：例程覆盖面更大，且不会让已有的例程脚本误触单动作路径。
             if (FakeRoutine.Length > 0)
             {
                 try { Ui.Post(delegate { ShowRoutine(FakeRoutine); }); } catch { }
+            }
+            else if (FakeAction.Length > 0)
+            {
+                try { Ui.Post(delegate { ShowSingleAction(FakeAction); }); } catch { }
             }
         }
 
@@ -6990,6 +7049,26 @@ namespace EyeLite
             if (sec != previewRemaining)
             {
                 previewRemaining = sec;
+
+                // 测试设施：EYE_LITE_TRACE_UI 已设时，把"预告期每次真正刷新数字"的墙钟打点追加进去。
+                // 格式：P <Clock.NowMs()> <秒>   （休息期仍是纯数字，不动那段，避免破坏已有解析）
+                //
+                // 为什么这条能定性：相邻两条 P 的 NowMs 差若出现 2000~3000ms，
+                // 说明**进程内 UI 线程被顶住了**（不是"探针慢"、不是"tick 没到"）。
+                // 若 P 间隔正常（~1s）而用户仍看到数字卡住，那是绘制/合成的问题，方向完全不同。
+                // 记在 SetCountdown **之前**：这一行的时刻是"tick 决定改数字"的时刻，
+                // 不把 SetCountdown 自身的耗时算进间隔里。
+                if (TraceUiFile.Length > 0)
+                {
+                    try
+                    {
+                        File.AppendAllText(TraceUiFile,
+                            "P " + Clock.NowMs().ToString() + " " + sec.ToString() + Environment.NewLine,
+                            new UTF8Encoding(false));
+                    }
+                    catch { }
+                }
+
                 try
                 {
                     if (previewForm != null)
@@ -7501,6 +7580,9 @@ namespace EyeLite
 
         private void UpdateTrayText()
         {
+            // A/B 测试闸门：EYE_LITE_NO_TRAY_TEXT=1 时整段跳过（不设时一行分支，行为不变）
+            if (NoTrayText) return;
+
             try
             {
                 string s;
@@ -7690,6 +7772,47 @@ namespace EyeLite
             catch { }
         }
 
+        /// <summary>
+        /// 测试设施：只播一个动作（EYE_LITE_FAKE_ACTION）。
+        /// 与 ShowRoutine 共用 routineForm，所以同一时刻只会存在一个演示窗。
+        /// 名字对不上就**什么都不做** —— 不弹空窗、不抛异常
+        /// （否则脚本会拿到一个"空演示"的假通过）。
+        /// </summary>
+        private void ShowSingleAction(string name)
+        {
+            try
+            {
+                if (name == null) return;
+                string want = name.Trim();
+                if (want.Length == 0) return;
+
+                List<MoveItem> all = MoveLib.Build();
+                MoveItem hit = null;
+                for (int i = 0; i < all.Count; i++)
+                {
+                    if (all[i].Name == want) { hit = all[i]; break; }
+                }
+                if (hit == null) return;
+
+                List<MoveItem> one = new List<MoveItem>();
+                one.Add(hit);
+
+                int total = hit.Seconds;
+                if (total < 1) total = 1;
+
+                if (routineForm != null)
+                {
+                    try { routineForm.Close(); routineForm.Dispose(); } catch { }
+                    routineForm = null;
+                }
+
+                routineForm = new MoveForm(one, total);
+                routineForm.FormClosed += delegate { routineForm = null; };
+                routineForm.Show();
+            }
+            catch { }
+        }
+
         private void ShowSettings()
         {
             using (SettingsForm f = new SettingsForm(cfg))
@@ -7858,6 +7981,9 @@ namespace EyeLite
         /// </summary>
         private void UpdateTrayProgressIcon()
         {
+            // A/B 测试闸门：EYE_LITE_NO_TRAY_ICON=1 时整段跳过（不设时一行分支，行为不变）
+            if (NoTrayIcon) return;
+
             // 休息期间保持 iconRest（见 BeginRest），不画进度环
             if (isResting) return;
 
