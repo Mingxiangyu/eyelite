@@ -1,5 +1,6 @@
 # 构建产物
 EyeLite.exe
+EyeLite-dev.exe
 obj/
 bin/
 
