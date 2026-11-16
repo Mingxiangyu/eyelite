@@ -5899,6 +5899,7 @@ namespace EyeLite
         private bool isPreviewing = false;
         private bool previewIsBody = false;     // 预告的是"活动一下"还是普通护眼休息
         private int previewRemaining = 0;
+        private string previewLastBody = "";   // 上次推给横幅的文案（到点让路时数字不变、文案要变）
         private PreviewForm previewForm;
 
         // 休息开始时的前台窗口；休息结束若发现前台被我们占了就还回去（安全网）
@@ -6804,15 +6805,24 @@ namespace EyeLite
                         // 预告期间又到点了（预览窗口内正好到点）→ 直接进休息
                         if (sedDue || workDue)
                         {
-                            EndPreview();
                             if (deferred)
                             {
-                                // 正在看片 / 正在打字：先把横幅收掉，别挂着；
-                                // 让路结束后（deferred 变 false）下面会自己重新进预告或直接开休息。
+                                // 正在打字 / 正在看片：**保留横幅**，只把文案换成"稍后提醒"。
+                                //
+                                // 这里原来是"先 EndPreview() 再 return"，注释写着"让路结束后会
+                                // 自己重新进预告"——那条路**不存在**：收掉之后 isPreviewing 已是
+                                // false，让路一结束就直接走下面的 `if (sedDue && !deferred) BeginRest`。
+                                // 用户经历的是"看到 3 → 横幅消失 → 几秒后遮罩突然弹出"，
+                                // 主观描述就是"倒计时卡住了"（QA 8/8 复现）。
+                                //
+                                // 横幅本身是 WS_EX_NOACTIVATE、不吃焦点、不拦键盘，留着不打扰；
+                                // 计时也照旧在让路中推进，不存在"停表"。
+                                UpdatePreviewCountdown();
                                 RefreshRemaining();
                                 UpdateTrayText();
                                 return;
                             }
+                            EndPreview();
                             BeginRest(sedDue);
                             return;
                         }
@@ -7370,6 +7380,19 @@ namespace EyeLite
         }
 
         /// <summary>每秒刷新横幅上的倒计时（值没变不重绘）。</summary>
+        /// <summary>
+        /// 到点却被让路时，横幅上显示的文案。
+        ///
+        /// 分两种措辞是因为原因不同、用户感受也不同：
+        ///   · 正在打字 → "正在输入，稍后提醒"（他自己知道在打字）
+        ///   · 在看片/开会（前台白名单）→ 只说"稍后提醒"，别硬说成"输入"
+        /// 两种都**不能说"已暂停"** —— 计时并没有停，只是这一轮被让后。
+        /// </summary>
+        private string DueHeldText()
+        {
+            return c4DeferSinceMs > 0 ? "正在输入，稍后提醒" : "稍后提醒";
+        }
+
         private void UpdatePreviewCountdown()
         {
             if (!isPreviewing) return;
@@ -7395,9 +7418,20 @@ namespace EyeLite
             if (leftAbs < 0) leftAbs = 0;
 
             int sec = (int)((leftAbs + 999) / 1000);
-            if (sec != previewRemaining)
+
+            // 到点却仍挂着横幅（= 到点被让路，见 OnTick 那一支）：
+            // 数字停在 1（传 0 会显示"0 秒"，可此刻不是"已结束"，是"随时可能开始"），
+            // 文案换成让路文案 —— 否则用户会以为倒计时坏了。
+            if (leftAbs <= 0 || sec < 1)
+            {
+                sec = 1;
+                body = DueHeldText();
+            }
+
+            if (sec != previewRemaining || body != previewLastBody)
             {
                 previewRemaining = sec;
+                previewLastBody = body;
 
                 // 测试设施：EYE_LITE_TRACE_UI 已设时，把"预告期每次真正刷新数字"的墙钟打点追加进去。
                 // 格式：P <Clock.NowMs()> <秒>   （休息期仍是纯数字，不动那段，避免破坏已有解析）

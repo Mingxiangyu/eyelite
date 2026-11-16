@@ -27,6 +27,12 @@ if not exist "%CSC%" goto NOCSC
 set "OUT=EyeLite.exe"
 if "%CHECK%"=="1" set "OUT=%TEMP%\eyelite-syntax-check.exe"
 
+rem /dev: build to EyeLite-dev.exe. The single-instance mutex is keyed by
+rem file name, so this binary runs alongside a user-owned EyeLite.exe
+rem without disturbing it - use it when you must verify behaviour while
+rem the user keeps working.
+if /i "%~1"=="/dev" set "OUT=EyeLite-dev.exe"
+
 echo ============================================
 echo   EyeLite build script
 if "%CHECK%"=="1" echo   MODE: /check (syntax gate, EyeLite.exe untouched)
@@ -37,6 +43,7 @@ rem --- Close running instance, otherwise the exe file is locked ---
 rem /check skips this: output lives in %TEMP%, nothing can collide,
 rem and it must never kill a process that belongs to someone else.
 if "%CHECK%"=="1" goto BUILD
+if /i "%~1"=="/dev" goto BUILD
 
 rem NOTE: must use findstr here, NOT find.
 rem   The old line used find's /i switch. Under Git Bash / MSYS that name
@@ -98,6 +105,7 @@ echo   ------------------------------------------------------------------
 echo.
 
 if "%CHECK%"=="1" goto CHECKCLEAN
+if /i "%~1"=="/dev" goto END
 
 set "RUNNOW="
 set /p RUNNOW=Start EyeLite now? (Y/N):
