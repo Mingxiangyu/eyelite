@@ -2719,6 +2719,46 @@ namespace EyeLite
         }
 
         /// <summary>
+        /// G10：按痛点的缓解例程。
+        ///
+        /// 一条例程 = 有序的动作名列表 + 由各动作自身 Seconds 决定的总时长。
+        /// 复用 MoveForm 的播放器：它的语义是"按预算循环播放给定动作"，
+        /// 所以只要把预算设成各动作 Seconds 之和，播完最后一个就正好收窗 —— 一次"跟练"。
+        ///
+        /// 为什么按痛点组织而不是按动作组织：动作库回答的是"有哪些动作"，
+        /// 而人的真实需求是"今天脖子难受，给我一套照着做完的"。
+        /// </summary>
+        public static readonly string[][] Routines = new string[][]
+        {
+            new string[] { "颈",   "颈部放松", "肩颈绕环", "靠墙站立" },
+            new string[] { "肩",   "肩胛后缩", "扩胸", "肩颈绕环" },
+            new string[] { "腰",   "起身伸展", "深蹲 10 次", "靠墙站立" },
+            new string[] { "腕",   "手腕绕环", "肩胛后缩" }
+        };
+
+        /// <summary>按例程名取出动作（保持表里的顺序）。找不到的名字直接跳过，不抛。</summary>
+        public static List<MoveItem> PickRoutine(string name)
+        {
+            List<MoveItem> all = Build();
+            List<MoveItem> pick = new List<MoveItem>();
+            string[] def = null;
+            for (int i = 0; i < Routines.Length; i++)
+            {
+                if (Routines[i][0] == name) { def = Routines[i]; break; }
+            }
+            if (def == null) return pick;
+
+            for (int d = 1; d < def.Length; d++)
+            {
+                for (int i = 0; i < all.Count; i++)
+                {
+                    if (all[i].Name == def[d]) { pick.Add(all[i]); break; }
+                }
+            }
+            return pick;
+        }
+
+        /// <summary>
         /// G11：这个动作是否被用户填的禁忌关键词排除。
         /// 匹配规则：分号分隔、逐项 Trim、大小写不敏感、**双向包含**
         ///（用户写「膝」能命中「膝关节」，写「膝关节」也能命中「膝」）。
@@ -2765,10 +2805,26 @@ namespace EyeLite
         private List<MoveItem> items;
         private int budgetMs;               // 本轮预算（= 剩余休息秒数，已被调用方截断）
         private int elapsedMs;
+        // 墙钟起点：elapsedMs 以前是"每帧 += TickMs"，定时器被系统合并时会整体变慢
+        // （实测 40 秒的例程跑了 63.7 秒）。改成从起点按真实时间算。
+        private long animStartMs;
         private int index;                  // 当前第几个动作
         private int actionStartMs;          // 当前动作的起点（elapsed 时间轴）
 
         private System.Windows.Forms.Timer anim;
+        
+        // 测试设施：EYE_LITE_TRACE_MOVE=<文件> 时记录演示窗内部状态，用于定位"画面不动"。
+        // 不设时只有一次空判断。
+        private static readonly string TraceMoveFile = ReadTraceMove();
+        private static string ReadTraceMove()
+        {
+            try
+            {
+                string v = Environment.GetEnvironmentVariable("EYE_LITE_TRACE_MOVE");
+                return v == null ? "" : v.Trim();
+            }
+            catch { return ""; }
+        }
         private float dpiScale = 1f;
 
         public MoveForm(List<MoveItem> actions, int restSeconds)
@@ -2845,7 +2901,12 @@ namespace EyeLite
                     return;
                 }
 
-                elapsedMs += TickMs;
+                // 用墙钟推进，不用"每帧加 16ms"：
+                // 定时器一旦被系统合并（这台机器上实测过多次），累加式会让整段演示变慢，
+                // 表现为"标称 40 秒的例程跑了 63 秒"。
+                if (animStartMs <= 0) animStartMs = Clock.NowMs();
+                elapsedMs = (int)(Clock.NowMs() - animStartMs);
+                if (elapsedMs < 0) elapsedMs = 0;
 
                 // 预算用完 → 收窗（休息有多长就演示多长，绝不比休息更长）
                 if (elapsedMs >= budgetMs)
@@ -2865,6 +2926,18 @@ namespace EyeLite
                     actionStartMs = elapsedMs;
                 }
 
+                if (TraceMoveFile.Length > 0)
+                {
+                    try
+                    {
+                        File.AppendAllText(TraceMoveFile,
+                            elapsedMs.ToString() + "," + index.ToString() + "," +
+                            items.Count.ToString() + "," + (elapsedMs - actionStartMs).ToString() +
+                            Environment.NewLine, new UTF8Encoding(false));
+                    }
+                    catch { }
+                }
+                
                 this.Invalidate();
             }
             catch { }
@@ -5423,6 +5496,18 @@ namespace EyeLite
         // 有了它，数字每 200ms 从绝对时刻重算，即使 tick 迟到也不会跳。
         private System.Windows.Forms.Timer fastUi;
 
+        // 测试设施：见 ctor 尾部说明
+        private static readonly string FakeRoutine = ReadFakeRoutine();
+        private static string ReadFakeRoutine()
+        {
+            try
+            {
+                string v = Environment.GetEnvironmentVariable("EYE_LITE_FAKE_ROUTINE");
+                return v == null ? "" : v.Trim();
+            }
+            catch { return ""; }
+        }
+
         // 测试设施：EYE_LITE_TRACE_UI=<文件> 时，把每秒实际显示给用户的剩余秒数追加进去。
         // 为什么需要它：遮罩上的倒计时是**画在环里的**，没有控件文本可读，
         // 外部探针无法验证"有没有跳数"。不设环境变量时只有一次空判断，零 IO。
@@ -5737,6 +5822,19 @@ namespace EyeLite
             }
             menu.Items.Add(miPlugins);
 
+            // G10：按痛点的缓解例程。不依赖插件开关 —— 这是一次显式点击，
+            // 用户已经表达了"我现在就要缓解"的意图，不该再被配置拦住。
+            ToolStripMenuItem miRoutine = new ToolStripMenuItem("缓解一下");
+            for (int ri = 0; ri < MoveLib.Routines.Length; ri++)
+            {
+                string rname = MoveLib.Routines[ri][0];
+                ToolStripMenuItem ritem = new ToolStripMenuItem(rname + "部");
+                string captured = rname;
+                ritem.Click += delegate { ShowRoutine(captured); };
+                miRoutine.DropDownItems.Add(ritem);
+            }
+            menu.Items.Add(miRoutine);
+
             menu.Items.Add(new ToolStripSeparator());
 
             ToolStripMenuItem miSettings = new ToolStripMenuItem("设置…");
@@ -5789,6 +5887,14 @@ namespace EyeLite
             if (OpenSettingsOnStart)
             {
                 try { Ui.Post(delegate { ShowSettings(); }); } catch { }
+            }
+
+            // 测试设施：EYE_LITE_FAKE_ROUTINE=颈|肩|腰|腕 时，启动即播该例程。
+            // 用途：自动化验证"例程能弹窗、能按顺序推进、播完自动收窗"，
+            // 否则只能靠人手点托盘菜单。不设时零影响。
+            if (FakeRoutine.Length > 0)
+            {
+                try { Ui.Post(delegate { ShowRoutine(FakeRoutine); }); } catch { }
             }
         }
 
@@ -7453,6 +7559,40 @@ namespace EyeLite
             }
 
             UpdateTrayText();
+        }
+
+        // 例程窗的引用：一次只允许一个，重复点击先关旧的
+        private MoveForm routineForm;
+
+        /// <summary>
+        /// G10：播放一条缓解例程。
+        ///
+        /// 复用 MoveForm：预算 = 各动作 Seconds 之和，播完最后一个正好收窗。
+        /// 不做"点击后自动进休息"这类联动 —— 用户只是想让脖子舒服点，
+        /// 不该顺手把他这一轮的工作时钟重置掉。
+        /// </summary>
+        private void ShowRoutine(string name)
+        {
+            try
+            {
+                List<MoveItem> pick = MoveLib.PickRoutine(name);
+                if (pick.Count == 0) return;
+
+                int total = 0;
+                for (int i = 0; i < pick.Count; i++) total += pick[i].Seconds;
+                if (total < 1) total = 1;
+
+                if (routineForm != null)
+                {
+                    try { routineForm.Close(); routineForm.Dispose(); } catch { }
+                    routineForm = null;
+                }
+
+                routineForm = new MoveForm(pick, total);
+                routineForm.FormClosed += delegate { routineForm = null; };
+                routineForm.Show();
+            }
+            catch { }
         }
 
         private void ShowSettings()
