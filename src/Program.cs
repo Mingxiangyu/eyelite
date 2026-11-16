@@ -2639,7 +2639,7 @@ namespace EyeLite
                     new MovePose(0.70, -6, 140, 140, -12, -12, 0, 0, 0, -1.0),  // 向左侧屈
                     new MovePose(0.88, -6, 140, 140, -12, -12, 0, 0, 0, 1.0),   // 向右侧屈
                     new MovePose(1.00, 0, 8, 8, 0, 0, 0, 0, 0, 0)
-                }, null));
+                }, "stand-reach"));
 
             // 2) 深蹲 10 次：2 秒一次 × 10 次 = 20 秒（原来 30 秒/3 秒一次也是 10 次，
             //    但节奏偏慢、看不出"在做组"，所以连同周期一起压到 2 秒）。
@@ -2666,7 +2666,7 @@ namespace EyeLite
                     new MovePose(0.60, 0, 60, 60, 0, 0, 0, 0, 0, 0),            // 停一拍（最高点）
                     new MovePose(0.80, -3, 55, 55, -10, -10, 0, 0, 0, -1.0),    // 右侧
                     new MovePose(1.00, 0, 20, 20, 0, 0, 0, 0, 0, 0)
-                }, null));
+                }, "shoulder-circles"));
 
             // 4) 原地踏步：抬腿 0.85 交替，双臂**同向**摆动（反号 = 两臂一起甩）。
             list.Add(new MoveItem("原地踏步", 30, 1, "抬到大腿接近水平，落地轻",
@@ -2682,27 +2682,18 @@ namespace EyeLite
 
             // 5) 靠墙站立：静态姿势，但双臂要有呼吸起落（18 ↔ 28），否则画面像卡死。
             //    贴墙站要靠腰椎维持在轻度伸展位，所以腰椎相关词命中时也会被排除。
-            list.Add(new MoveItem("靠墙站立", 40, 6, "后脑 / 肩胛 / 臀部贴墙，收下巴",
-                new string[] { "腰椎" },
+            // 靠墙**静蹲**（原来是"靠墙站立"）：素材换成 wall-sit 的 f1/f2（屈膝 90 度静蹲）
+            // + f3（站起），所以画面里真的有"蹲"这个动作，而不是一张站立的静图。
+            // 静蹲是**承重**动作 —— 禁忌词必须带「膝」，否则膝关节有伤的人会被推荐去做深蹲。
+            list.Add(new MoveItem("靠墙静蹲", 40, 6, "背贴墙，大腿蹲到接近水平，膝盖不超过脚尖",
+                new string[] { "腰", "膝", "膝关节" },
                 new MovePose[]
                 {
                     new MovePose(0.00, -6, 18, 18, 0, 0, 0, 0, 0, 0),
                     new MovePose(0.45, -6, 28, 28, -6, -6, 0, 0, 0, 0),
                     new MovePose(0.60, -6, 28, 28, -6, -6, 0, 0, 0, 0),         // 吸气停一拍
                     new MovePose(1.00, -6, 18, 18, 0, 0, 0, 0, 0, 0)
-                }, null));
-
-            // 6) 手腕绕环：手臂前平举 25 度，前臂 -70 ↔ +70 往返（这才是"绕环"的可见幅度）。
-            list.Add(new MoveItem("手腕绕环", 20, 2, "手臂前平举，手腕画小圈",
-                new string[] { "腕", "腱鞘", "腕管" },
-                new MovePose[]
-                {
-                    new MovePose(0.00, 0, 25, 25, 0, 0, 0, 0, 0, 0),
-                    new MovePose(0.25, 0, 25, 25, -70, -70, 0, 0, 0, 0),
-                    new MovePose(0.50, 0, 25, 25, 0, 0, 0, 0, 0, 0),
-                    new MovePose(0.75, 0, 25, 25, 70, 70, 0, 0, 0, 0),
-                    new MovePose(1.00, 0, 25, 25, 0, 0, 0, 0, 0, 0)
-                }, null));
+                }, "wall-stand"));
 
             // 7) 颈部放松：头左右缓慢侧屈（不是转圈 —— 绕环对颈椎不稳的人不友好）。
             //    5 秒一个来回，两侧各停一拍：慢才安全，快就是甩脖子。
@@ -2717,10 +2708,12 @@ namespace EyeLite
                     new MovePose(0.78, 2, 8, 8, 0, 0, 0, 0, 0, 1.0),           // 向右靠
                     new MovePose(0.92, 2, 8, 8, 0, 0, 0, 0, 0, 1.0),           // 停一拍
                     new MovePose(1.00, 0, 8, 8, 0, 0, 0, 0, 0, 0)
-                }, null));
+                }, "neck-release"));
 
             // 8) 肩胛后缩：坐姿就能做。前臂向内夹到 -70（肘向后夹紧），双臂微开 12 → 28。
-            list.Add(new MoveItem("肩胛后缩", 20, 4, "坐着就行：把两侧肩胛骨向后夹，别耸肩",
+            // 单臂横跨胸前（原来是"肩胛后缩"）：素材换成 cross-body-shoulder-stretch 三帧。
+            // 目录名保留 scapular-retraction（改目录要同步 manifest 与代码，不值当）。
+            list.Add(new MoveItem("单臂横跨胸前", 20, 4, "一只手臂横过胸前，另一只手轻压肘部，换边做",
                 new string[] { "肩", "肩袖" },
                 new MovePose[]
                 {
@@ -2728,7 +2721,21 @@ namespace EyeLite
                     new MovePose(0.40, -3, 28, 28, -70, -70, 0, 0, 0, 0),       // 夹到最紧
                     new MovePose(0.60, -3, 28, 28, -70, -70, 0, 0, 0, 0),       // 停一拍
                     new MovePose(1.00, 0, 12, 12, 0, 0, 0, 0, 0, 0)
-                }, null));
+                }, "scapular-retraction"));
+
+            // 9) 躯干转体：替代原来"全开源找不到素材"的手腕绕环。
+            //    素材用 russian-twist 三帧（坐姿、双手抱胸、左右转体、**无器械**）。
+            //    注意不是 torso-twist-stretch —— 那张手里拿着杠片，不符合"工位上坐着做"。
+            list.Add(new MoveItem("躯干转体", 20, 4, "坐着也行：双手抱胸，缓慢向左右转动上身",
+                new string[] { "腰" },
+                new MovePose[]
+                {
+                    new MovePose(0.00, 0, 30, 30, 80, 80, 0, 0, 0, 0),
+                    new MovePose(0.25, 0, 30, 30, 80, 80, 0, 0, 0, -1.0),   // 向左转
+                    new MovePose(0.50, 0, 30, 30, 80, 80, 0, 0, 0, 0),
+                    new MovePose(0.75, 0, 30, 30, 80, 80, 0, 0, 0, 1.0),    // 向右转
+                    new MovePose(1.00, 0, 30, 30, 80, 80, 0, 0, 0, 0)
+                }, "torso-twist"));
 
             // 9) 扩胸：双臂平举后展到 85（不是 42 —— 42 度时手臂还贴着身体），
             //    前臂外张 20，躯干轻伸 -6，胸口往前送。肩部有问题的会被禁忌词挡掉。
@@ -2757,10 +2764,9 @@ namespace EyeLite
         /// </summary>
         public static readonly string[][] Routines = new string[][]
         {
-            new string[] { "颈",   "颈部放松", "肩颈绕环", "靠墙站立" },
-            new string[] { "肩",   "肩胛后缩", "扩胸", "肩颈绕环" },
-            new string[] { "腰",   "起身伸展", "深蹲 10 次", "靠墙站立" },
-            new string[] { "腕",   "手腕绕环", "肩胛后缩" }
+            new string[] { "颈",   "颈部放松", "肩颈绕环", "靠墙静蹲" },
+            new string[] { "肩",   "单臂横跨胸前", "扩胸", "肩颈绕环" },
+            new string[] { "腰",   "起身伸展", "深蹲 10 次", "躯干转体" },
         };
 
         /// <summary>按例程名取出动作（保持表里的顺序）。找不到的名字直接跳过，不抛。</summary>
@@ -3133,8 +3139,8 @@ namespace EyeLite
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
 
             // ---- 动作画面：有素材就画素材，没素材回退自绘火柴人 ----
-            // 回退是**永久保留**的安全网：颈/腕两个动作上游没有合适素材，
-            // 而且素材资源缺失/损坏时也不能白屏。
+            // 回退是**永久保留**的安全网：现在所有动作都有素材了，但素材资源缺失/损坏时
+            // 仍然不能白屏；而且"素材表达不出来"的动作将来随时可能回退到这里。
             int localMs = elapsedMs - actionStartMs;
             double cycle = item.CycleSeconds * 1000.0;
             double t = cycle <= 0 ? 0 : (localMs % cycle) / cycle;
@@ -3205,6 +3211,7 @@ namespace EyeLite
         // 下蹲这类姿势底部还留 5%~6% 的透明边。按画布对齐会让脚悬空、人也不够高，
         // 所以加载时实测一次，用它换算 side 与落地点。
         private double assetInkHeightRatio = 0.90;       // 墨迹高 / 画布高（三帧取最大，统一缩放用）
+        private double assetInkWidthRatio = 0.50;        // 墨迹宽 / 画布宽（取最大，用于限制横向尺寸）
         private readonly double[] assetInkBottomRatio = new double[3];  // 每帧：墨迹底边到画布底边 / 画布高
         private string assetFramesKey;     // 对应的 AssetKey（null = 未加载）
 
@@ -3226,6 +3233,7 @@ namespace EyeLite
 
             Bitmap[] loaded = new Bitmap[3];
             double maxInkH = 0.0;
+            double maxInkW = 0.0;
             double[] bottoms = new double[3];
             for (int i = 0; i < 3; i++)
             {
@@ -3239,7 +3247,7 @@ namespace EyeLite
                     using (Bitmap src = new Bitmap(st))
                     {
                         double bottomRatio = 0.0;
-                        MeasureInkRatio(src, ref maxInkH, ref bottomRatio);
+                        MeasureInkRatio(src, ref maxInkH, ref bottomRatio, ref maxInkW);
                         bottoms[i] = bottomRatio;
                         loaded[i] = ScaleFrame(src, side);
                     }
@@ -3253,6 +3261,7 @@ namespace EyeLite
             // 高度用三帧最大值（统一缩放，保证下蹲时人确实变矮，而不是每帧各自拉满）；
             // 底边**按帧**记：每帧各自把「墨迹底边」贴到地面线，脚不会踩进下面的提示文字。
             assetInkHeightRatio = maxInkH > 0.1 ? maxInkH : 0.90;
+            assetInkWidthRatio = maxInkW > 0.05 ? maxInkW : 0.50;
             for (int i = 0; i < 3; i++) assetInkBottomRatio[i] = bottoms[i];
             return true;
         }
@@ -3263,7 +3272,7 @@ namespace EyeLite
         /// 为什么需要实测：画布是 512 见方，但人物并不填满 —— 深蹲三帧的墨迹高只占 89%、
         /// 底部还留 6% 透明边。按「画布高」对齐会让脚悬在半空、人形也比火柴人矮一截。
         /// </summary>
-        private static void MeasureInkRatio(Bitmap src, ref double maxH, ref double bottomRatio)
+        private static void MeasureInkRatio(Bitmap src, ref double maxH, ref double bottomRatio, ref double maxW)
         {
             try
             {
@@ -3271,17 +3280,22 @@ namespace EyeLite
                 if (w < 8 || h < 8) return;
 
                 int top = h, bot = -1;
+                int left = w, right = -1;
                 for (int y = 0; y < h; y++)
                 {
-                    for (int x = 0; x < w; x += 2)
+                    // 这一行**必须整行扫完**，不能 break 在第一个命中点：
+                    // 那样 right 只会停在"最左边那个命中"，宽度被严重低估，
+                    // 宽度限制形同虚设 —— 坐姿动作（墨迹宽 480/512）直接被窗口两边裁掉（实测踩到）。
+                    // 阈值 60 而不是 8：素材图边缘有一圈很淡的投影/抗锯齿，
+                    // 把它算进墨迹会把"最高帧"估高 4%，整张图被缩小（实测人形只有 74%）。
+                    for (int x = 0; x < w; x++)
                     {
-                        // 阈值 60 而不是 8：素材图边缘有一圈很淡的投影/抗锯齿，
-                        // 把它算进墨迹会把"最高帧"估高 4%，导致整张图被缩小（实测人形只有 74%）。
                         if (src.GetPixel(x, y).A > 60)
                         {
                             if (y < top) top = y;
                             if (y > bot) bot = y;
-                            break;
+                            if (x < left) left = x;
+                            if (x > right) right = x;
                         }
                     }
                 }
@@ -3291,6 +3305,14 @@ namespace EyeLite
                 double inkBottom = (h - 1 - bot) / (double)h;
                 if (inkH > maxH) maxH = inkH;
                 bottomRatio = inkBottom;
+
+                // 宽度只在"整行扫描"里可靠（上面的 x+=2 会漏掉最左/最右的列），
+                // 所以这里对每一行单独取 min/max 之后再合成整体外框。
+                if (right >= left)
+                {
+                    double inkW = (right - left + 1) / (double)w;
+                    if (inkW > maxW) maxW = inkW;
+                }
             }
             catch { }
         }
@@ -3353,6 +3375,13 @@ namespace EyeLite
             // 反过来把它钳到窗宽，深蹲这种「墨迹只占 89%」的图就会矮一截（实测 77%）。
             int maxSide = (int)Math.Round(figH * 1.6);
             if (side > maxSide) side = maxSide;
+            // 宽度也要管：坐姿动作（躯干转体）的墨迹是"宽而矮"，只按高度算尺寸
+            // 会把画布撑得比窗口还宽，左右两边直接被裁掉。按"墨迹宽度 ≤ 窗宽 98%"再收一次。
+            if (assetInkWidthRatio > 0.05)
+            {
+                int maxByWidth = (int)Math.Round(w * 0.98 / assetInkWidthRatio);
+                if (side > maxByWidth) side = maxByWidth;
+            }
             if (side < 16) side = 16;
 
             if (!EnsureAssetFrames(item.AssetKey, side)) return false;
