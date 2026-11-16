@@ -12,7 +12,13 @@ echo ============================================
 echo.
 
 rem --- Close running instance, otherwise the exe file is locked ---
-tasklist /fi "imagename eq EyeLite.exe" 2>nul | find /i "EyeLite.exe" >nul
+rem NOTE: must use findstr here, NOT find.
+rem   `find /i "EyeLite.exe"` resolves to GNU find under Git Bash / MSYS,
+rem   which prints `find: '/i': No such file or directory` and returns errorlevel=1.
+rem   The detection then silently says "not running" -> no prompt -> compile
+rem   collides with the file lock (CS0016).
+rem   findstr ships with Windows and is resolved inside cmd, so PATH order cannot break it.
+tasklist /fi "imagename eq EyeLite.exe" 2>nul | findstr /I "EyeLite.exe" >nul
 if errorlevel 1 goto BUILD
 
 echo EyeLite is running. It must be closed before rebuilding.
