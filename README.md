@@ -55,6 +55,16 @@ EyeLite 是一个只做一件事的 Windows 托盘程序：每隔 N 分钟弹出
 
 ![多显示器效果](docs/screenshots/dual-monitor.jpg)
 
+### 预告横幅
+
+到点前会先在右下角弹一张卡片，给三个出口（延后 / 跳过 / 立即休息），避免"到点就被糊一脸"：
+
+![EyeLite 预告横幅](docs/screenshots/02-preview.png)
+
+右侧的大数字与「秒」按**墨迹底边**对齐（`PreviewForm.AlignUnitToCountBaseline`：先 `DrawToBitmap`，
+再在数字与单位的矩形里各自找最下一行亮像素，最后把单位框平移过去）。
+不用 `MeasureText` 的行框高，是因为行框底还含 descent 留白，按它对齐会系统性偏低十几像素。
+
 ### 动作演示
 
 久坐提醒会弹一个 720×640 的演示窗，按顺序播放动作，播完自动收窗；右上角「结束」可随时关掉。
