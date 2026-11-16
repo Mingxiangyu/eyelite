@@ -16,17 +16,24 @@
       "licenseUrl": "https://unlicense.org/",
       "rule": "公有领域，可任意裁剪/抠图/调色，无义务",
       "frameSpec": "2 帧 850x567 JPG（照片）"
-    },
-    {
-      "repo": "https://github.com/everkinetic/data",
-      "license": "CC BY-SA 4.0",
-      "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
-      "rule": "**已转换**：白底黑线 → 白线 + 透明底、等比缩放到 512 方图（tools/convert-ek.py）。衍生图同样以 CC BY-SA 4.0 提供。",
-      "frameSpec": "每动作 2 帧（tension / relaxation），非方图"
     }
   ],
   "totalBytes": 929258,
   "moves": [
+    {
+      "id": "calf-stretch",
+      "action": "扶墙小腿拉伸",
+      "repo": "bryllim/workout-guide",
+      "slug": "wall-calf-stretch",
+      "license": "CC BY-SA 4.0",
+      "frames": 3,
+      "files": [
+        "assets/moves/calf-stretch/frame1.png",
+        "assets/moves/calf-stretch/frame2.png",
+        "assets/moves/calf-stretch/frame3.png"
+      ],
+      "note": "双手扶墙、一腿后撤脚跟压地。替代\"颈部放松\"：workout-guide 302 条无颈部动作，everkinetic 只有半身像（风格不统一、动作读不出），已弃用。"
+    },
     {
       "id": "chest-open",
       "nameZh": "扩胸",
@@ -50,6 +57,20 @@
       "note": "门框胸肌拉伸，方向正确；但画面里画了门框"
     },
     {
+      "id": "lateral-lunge",
+      "action": "侧弓步",
+      "repo": "bryllim/workout-guide",
+      "slug": "lateral-lunge",
+      "license": "CC BY-SA 4.0",
+      "frames": 3,
+      "files": [
+        "assets/moves/lateral-lunge/frame1.png",
+        "assets/moves/lateral-lunge/frame2.png",
+        "assets/moves/lateral-lunge/frame3.png"
+      ],
+      "note": "站立、无器械、左右侧向下蹲。替代\"躯干转体\"：全量 302 条里没有可用的转体素材（russian-twist 有药球、torso-twist-stretch 手持杠片）。"
+    },
+    {
       "id": "march-in-place",
       "nameZh": "原地踏步",
       "source": "bryllim/workout-guide",
@@ -70,26 +91,6 @@
         "changes": ""
       },
       "note": "更接近「高抬腿跑」，比「自然踏步」激烈"
-    },
-    {
-      "id": "neck-release",
-      "nameZh": "颈部放松",
-      "source": "yuhonas/free-exercise-db",
-      "sourceSlug": "Side_Neck_Stretch",
-      "frames": 2,
-      "frameCount": 2,
-      "bytes": 47368,
-      "attribution": {
-        "creator": "yuhonas/free-exercise-db contributors",
-        "creatorUrl": "https://github.com/yuhonas/free-exercise-db",
-        "license": "Unlicense (public domain)",
-        "licenseUrl": "https://unlicense.org/",
-        "sourceUrl": "https://github.com/yuhonas/free-exercise-db",
-        "changes": ""
-      },
-      "note": "everkinetic 的 0002-relaxation / 0002-tension，原图是**白底黑线、非 512 方图**，已由 tools/convert-ek.py 转成白线+透明底并缩放到 512 方图；衍生图同样以 CC BY-SA 4.0 提供。第 3 帧复用第 1 帧。",
-      "action": "颈部放松",
-      "slug": "0002 (everkinetic)"
     },
     {
       "id": "scapular-retraction",
@@ -172,20 +173,6 @@
       "note": "单帧：jumping-jack 的 f1 是唯一\"无器械 + 双臂过头 + 直立全身\"的一张，缺点是双脚分开。三帧都指向同一张图（乒乓播放时视觉静止）。",
       "action": "起身伸展",
       "slug": "jumping-jack"
-    },
-    {
-      "id": "torso-twist",
-      "action": "躯干转体",
-      "repo": "bryllim/workout-guide",
-      "slug": "russian-twist",
-      "license": "CC BY-SA 4.0",
-      "frames": 3,
-      "files": [
-        "assets/moves/torso-twist/frame1.png",
-        "assets/moves/torso-twist/frame2.png",
-        "assets/moves/torso-twist/frame3.png"
-      ],
-      "note": "坐姿、双手抱胸、左右转体、**无器械**。注意不是 torso-twist-stretch（那张手持杠片）；替代原来\"全开源找不到素材\"的手腕绕环。墨迹宽高比约 480:341，渲染时受窗口宽度限制，人形占窗高只有约 61%（其余动作 77~81%）。"
     },
     {
       "id": "wall-stand",

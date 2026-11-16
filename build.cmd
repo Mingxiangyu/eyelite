@@ -98,12 +98,12 @@ set "RES=%RES% /resource:assets\moves\wall-stand\frame3.png,EyeLite.res.wall-sta
 set "RES=%RES% /resource:assets\moves\scapular-retraction\frame1.png,EyeLite.res.scapular-retraction.1"
 set "RES=%RES% /resource:assets\moves\scapular-retraction\frame2.png,EyeLite.res.scapular-retraction.2"
 set "RES=%RES% /resource:assets\moves\scapular-retraction\frame3.png,EyeLite.res.scapular-retraction.3"
-set "RES=%RES% /resource:assets\moves\neck-release\frame1.png,EyeLite.res.neck-release.1"
-set "RES=%RES% /resource:assets\moves\neck-release\frame2.png,EyeLite.res.neck-release.2"
-set "RES=%RES% /resource:assets\moves\neck-release\frame3.png,EyeLite.res.neck-release.3"
-set "RES=%RES% /resource:assets\moves\torso-twist\frame1.png,EyeLite.res.torso-twist.1"
-set "RES=%RES% /resource:assets\moves\torso-twist\frame2.png,EyeLite.res.torso-twist.2"
-set "RES=%RES% /resource:assets\moves\torso-twist\frame3.png,EyeLite.res.torso-twist.3"
+set "RES=%RES% /resource:assets\moves\calf-stretch\frame1.png,EyeLite.res.calf-stretch.1"
+set "RES=%RES% /resource:assets\moves\calf-stretch\frame2.png,EyeLite.res.calf-stretch.2"
+set "RES=%RES% /resource:assets\moves\calf-stretch\frame3.png,EyeLite.res.calf-stretch.3"
+set "RES=%RES% /resource:assets\moves\lateral-lunge\frame1.png,EyeLite.res.lateral-lunge.1"
+set "RES=%RES% /resource:assets\moves\lateral-lunge\frame2.png,EyeLite.res.lateral-lunge.2"
+set "RES=%RES% /resource:assets\moves\lateral-lunge\frame3.png,EyeLite.res.lateral-lunge.3"
 set "RES=%RES% /resource:assets\ATTRIBUTION.md,EyeLite.res.ATTRIBUTION.md"
 
 "%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ /debug- /codepage:65001 /out:"%OUT%" /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll "src\Program.cs" %RES%

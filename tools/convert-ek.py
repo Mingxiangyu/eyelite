@@ -22,6 +22,10 @@ convert-ek.py —— 把 everkinetic 的「白底黑线」PNG 转成我们用的
 许可提示：everkinetic 是 CC BY-SA 4.0，本脚本产出的是**衍生图**，
 必须同样以 CC BY-SA 4.0 提供（见 assets/ATTRIBUTION.md）。
 
+
+注意：**当前没有任何动作在使用本脚本的产物**（颈部素材因"只有半身像"被弃用，
+已换成扶墙小腿拉伸）。保留它是为了将来引入 everkinetic 素材时直接复用。
+
 用法：
     python tools/convert-ek.py <relaxation.png> <tension.png> <输出目录>
 """
