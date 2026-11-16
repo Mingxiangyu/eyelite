@@ -244,7 +244,7 @@ namespace EyeLite
         private static extern int GetDeviceCaps(IntPtr hdc, int index);
 
         /// <summary>设置面板上显示的版本号；发布时与 git tag 同步，只改这一处。</summary>
-        public const string AppVersion = "v1.4.0";
+        public const string AppVersion = "v1.5.0";
 
         /// <summary>圆角矩形路径。调用方负责 Dispose。</summary>
         public static GraphicsPath RoundedRect(Rectangle r, int radius)
