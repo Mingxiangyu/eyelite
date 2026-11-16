@@ -4635,6 +4635,70 @@ namespace EyeLite
             return (int)(px * dpiScale + 0.5f);
         }
 
+        /// <summary>
+        /// **实测**某个字体画出某个字之后的墨迹上下边界（相对行框顶）。
+        ///
+        /// 为什么不靠字体度量算基线：这个项目的数字字体是 `Ui.GetTimeFont(px)` 造的，
+        /// 它按**像素**单位构造，而 `Font.SizeInPoints` 会按 72/96 换算一次 ——
+        /// 两条路径的 em 大小不一致，算出来的 ascent 实测差十几像素（我按 ascent 做的
+        /// 第一版就是这样：墨迹底边还差 14px）。离屏画一遍再找边界，
+        /// 走的是与 Label **完全相同**的 TextRenderer 路径，换字体/换 DPI 都不会跑。
+        ///
+        /// 只在构造期调用两次，位图尺寸 = 单字大小，开销可忽略。
+        /// </summary>
+        /// <summary>
+        /// 把「秒」整体平移到与数字**墨迹底边**同一条线上。
+        ///
+        /// 只在第一次显示时跑一次。做法是把窗体贴成位图（与屏幕渲染走同一套 GDI 文本），
+        /// 在两个 Label 各自的矩形内找最下面一行亮像素，差值就是需要平移的量。
+        /// 为什么不用字体度量算：见构造里那段注释——算出来的会差十几像素。
+        /// </summary>
+        private void AlignUnitToCountBaseline()
+        {
+            try
+            {
+                if (lblCount == null || lblCountUnit == null) return;
+
+                int w = this.ClientSize.Width;
+                int h = this.ClientSize.Height;
+                if (w <= 0 || h <= 0) return;
+
+                using (Bitmap bmp = new Bitmap(w, h))
+                {
+                    this.DrawToBitmap(bmp, new Rectangle(0, 0, w, h));
+
+                    int numBottom = InkBottomIn(bmp, lblCount.Bounds);
+                    int unitBottom = InkBottomIn(bmp, lblCountUnit.Bounds);
+                    if (numBottom <= 0 || unitBottom <= 0) return;
+
+                    int dy = numBottom - unitBottom;
+                    if (dy != 0) lblCountUnit.Top += dy;
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>在给定矩形内找最下面一行"比背景亮"的像素；找不到返回 -1。</summary>
+        private static int InkBottomIn(Bitmap bmp, Rectangle r)
+        {
+            int x0 = Math.Max(0, r.Left);
+            int x1 = Math.Min(bmp.Width, r.Right);
+            int y0 = Math.Max(0, r.Top);
+            int y1 = Math.Min(bmp.Height, r.Bottom);
+
+            for (int y = y1 - 1; y >= y0; y--)
+            {
+                for (int x = x0; x < x1; x++)
+                {
+                    Color c = bmp.GetPixel(x, y);
+                    // 文字是浅色、卡片底是深色：用亮度阈值把两者分开
+                    if ((c.R + c.G + c.B) > 300) return y;
+                }
+            }
+            return -1;
+        }
+
+
         public event EventHandler RequestPostpone;
         public event EventHandler RequestSkip;
         public event EventHandler RequestNow;
@@ -4686,7 +4750,24 @@ namespace EyeLite
             lblCountUnit.AutoSize = false;
             lblCountUnit.BackColor = Color.Transparent;
             lblCountUnit.SetBounds(w - Sc(38), Sc(40), Sc(24), Sc(20));
+
+            // ---- 让「秒」与数字的**墨迹底边**对齐（在窗体第一次显示后实测校正）----
+            //
+            // 为什么不在构造期算：两个 Label 各自垂直居中，但"居中的是行框、不是字形"，
+            // 而不同字号的行内留白（ascent/descent/leading）比例完全不同。
+            // 我试过两种"按度量算"的写法，实测都差 11~14px：
+            //   · TextRenderer.MeasureText("0", font).Height → 拿到的是行框高，不是墨迹；
+            //   · 用 FontFamily.GetCellAscent/GetEmHeight 算基线 → 数字字体是
+            //     `Ui.GetTimeFont(px)` 按**像素**单位构造的，SizeInPoints 会再按 72/96 换算，
+            //     两条路径的 em 大小不一致，算出来的基线偏。
+            // 换 DPI 或换字体还会再错一次 —— 所以改成"画出来再量"：
+            // 首次显示时把窗体贴到离屏位图，量两块区域的墨迹底边，把单位框平移过去。
+            // 这是自校准：任何字体、任何 DPI 都成立，没有写死的像素。
             this.Controls.Add(lblCountUnit);
+
+            // 延迟到第一次显示再校正：构造函数里控件还没真正画过，量不到墨迹。
+            this.Shown += delegate { AlignUnitToCountBaseline(); };
+
 
             // ---- 说明文案 ----
             lblBody = new Label();
