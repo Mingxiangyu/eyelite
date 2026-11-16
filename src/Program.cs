@@ -2914,7 +2914,9 @@ namespace EyeLite
         // （这个坑 720x640 那次已经踩过一次：地面从 Sc(316) 挪到 Sc(512)，提示行留在 Sc(392) 压住了腿）。
         private const int LayoutTipsBottom = 64;   // 要点文字底边（标题 14..42 + 要点 44..64）
         private const int LayoutFigTop = 66;       // 人形可用上边界：要点下面 2px
-        private const int LayoutBottomChrome = 80; // 地面线到底边：提示(18)+倒计时(18)+进度条(6)+间距
+        private const int LayoutBottomChrome = 84; // 地面线到底边：提示(18)+倒计时(18)+进度条(6)+间距
+                                                   // 88 而不是 80：人形线宽现在按身高走（18%），
+                                                   // 脚底那笔有 ~8px 半宽，80 会让脚压到「如有不适」那行。
 
         /// <summary>脚底的 y（"地面线"）。</summary>
         // 人形缩放系数：由 DrawFigure 每次绘制前按可用高度算出来，
@@ -3435,24 +3437,38 @@ namespace EyeLite
             int cx = w / 2;
             int groundY = FigGroundY();
 
-            // 人物总高 = 地面线 - 人物上边界（见 FigGroundY/FigHeight）。
-            // 基准模型在中立姿势下的总高 = 268 逻辑像素：
-            //   thigh 70 + shin 70 + torso 78 + 头直径 44 + 颈缝 6 = 268
-            // 各段统一乘 k，所以"窗口多高人形多高"；不再写死任何一段长度。
-            int figH = FigHeight();
-            double k = figH / (double)Sc(268);
-            if (k < 0.2) k = 0.2;
-            figK = k;
+            // ============================================================
+            // 人体比例：全部以「身高 H」为基准（单一来源），不再写死像素段长。
+            // ============================================================
+            //
+            // 为什么必须这样改：原来各段是固定像素（torso 78 / thigh 70 / headR 22…），
+            // 按窗口高度放大 2.4 倍后，头变成 150px，而线宽只从 3px 到 7px ——
+            // 观感就是「一个大球挂在几根牙签上」。素材图看着正常，正因为它自带真实比例。
+            //
+            // 系数按「约 7.5 头身」定：头占身高 13%、腿 48%、躯干 32%、颈 4%，
+            // 合计 0.97 → 头顶留 3% 余量，保证头顶永远在要点文字下方。
+            int H = FigHeight();
+            if (H < 40) H = 40;
 
-            int lenTorso = Sf(78);
-            int lenArm = Sf(56);
-            int lenFore = Sf(48);
-            int lenThigh = Sf(70);
-            int lenShin = Sf(70);
-            int headR = Sf(22);
+            int headR = (int)Math.Round(H * 0.065);        // 头直径 = 13% 身高
+            int neckLen = (int)Math.Round(H * 0.04);       // 颈
+            int halfShoulder = (int)Math.Round(H * 0.055); // 肩宽半距
+            int halfHip = (int)Math.Round(H * 0.035);      // 髋宽半距
+            int lenTorso = (int)Math.Round(H * 0.32);
+            int lenArm = (int)Math.Round(H * 0.155);
+            int lenFore = (int)Math.Round(H * 0.145);
+            int lenThigh = (int)Math.Round(H * 0.245);
+            int lenShin = (int)Math.Round(H * 0.235);
 
-            // 下蹲：髋往下沉、膝盖往前顶。用两条腿的关节角度表达会更"真"，
-            // 但对火柴人来说"髋高 + 膝点偏移"就足够读懂，且不会算错。
+            // 线宽 / 关节尺寸也按身高走：放 2 倍时线要跟着粗，否则像铁丝
+            float penW = Math.Max(1.5f, (float)(H * 0.018));
+            float jointR = Math.Max(2f, (float)(H * 0.012));
+
+            // Sf() 供 DrawLeg 里的抬腿/外展偏移使用，基准同步成身高
+            figK = H / (double)Sc(268);
+            if (figK < 0.2) figK = 0.2;
+
+            // 下蹲：髋往下沉，位移量按腿长比例
             int crouchPx = (int)(lenThigh * 0.34 * p.Crouch);
             PointF hip = new PointF(cx, groundY - lenThigh - lenShin + crouchPx);
 
@@ -3461,17 +3477,26 @@ namespace EyeLite
                 (float)(hip.X + Math.Sin(torsoRad) * lenTorso),
                 (float)(hip.Y - Math.Cos(torsoRad) * lenTorso));
 
+            // 头：肩点沿躯干轴再往上「颈 + 半个头」
             PointF head = new PointF(
-                (float)(shoulder.X + Math.Sin(torsoRad) * (headR + Sf(6)) + p.HeadSway * Sf(14)),
-                (float)(shoulder.Y - Math.Cos(torsoRad) * (headR + Sf(6))));
+                (float)(shoulder.X + Math.Sin(torsoRad) * (neckLen + headR) + p.HeadSway * H * 0.02),
+                (float)(shoulder.Y - Math.Cos(torsoRad) * (neckLen + headR)));
 
-            using (Pen body = new Pen(Ui.TimeText, Math.Max(1f, (float)(Sc(3) * figK))))
+            // 左右肩点 / 左右髋点：这是「有肩宽、有髋宽」的来源。
+            // 原来两臂从同一个脊椎顶点岔开、两腿从同一个点并拢，放大后就是「三点一线」。
+            float perpX = (float)Math.Cos(torsoRad);
+            PointF shoulderL = new PointF(shoulder.X - perpX * halfShoulder, shoulder.Y);
+            PointF shoulderR = new PointF(shoulder.X + perpX * halfShoulder, shoulder.Y);
+            PointF hipL = new PointF(hip.X - halfHip, hip.Y);
+            PointF hipR = new PointF(hip.X + halfHip, hip.Y);
+
+            using (Pen body = new Pen(Ui.TimeText, penW))
             using (SolidBrush headBrush = new SolidBrush(Ui.TimeText))
             using (SolidBrush jointBrush = new SolidBrush(Ui.Accent))
             using (Pen ground = new Pen(Ui.RingTrack, Math.Max(1f, Sc(2))))
             {
                 // 关节处必须是圆头圆角：动作幅度一大（手臂过头、前臂 -70）之后，
-                // 平的线端会在肩/肘/膝留下明显的尖角缺口，看起来像"骨折"。
+                // 平的线端会在肩/肘/膝留下明显的尖角缺口，看起来像「骨折」。
                 body.StartCap = LineCap.Round;
                 body.EndCap = LineCap.Round;
                 body.LineJoin = LineJoin.Round;
@@ -3479,26 +3504,35 @@ namespace EyeLite
                 // 地面
                 g.DrawLine(ground, Sc(60), groundY, w - Sc(60), groundY);
 
-                // 腿
-                PointF kneeL = DrawLeg(g, body, hip, groundY, lenThigh, lenShin, p.Crouch, p.StepL, -1);
-                PointF kneeR = DrawLeg(g, body, hip, groundY, lenThigh, lenShin, p.Crouch, p.StepR, +1);
+                // 腿（各自从髋点出发）
+                PointF kneeL = DrawLeg(g, body, hipL, groundY, lenThigh, lenShin, p.Crouch, p.StepL, -1);
+                PointF kneeR = DrawLeg(g, body, hipR, groundY, lenThigh, lenShin, p.Crouch, p.StepR, +1);
 
-                // 躯干
+                // 髋宽线 + 躯干
+                g.DrawLine(body, hipL, hipR);
                 g.DrawLine(body, hip, shoulder);
 
-                // 手臂
-                DrawArm(g, body, shoulder, torsoRad, lenArm, lenFore, p.ArmL, p.ForeL, -1);
-                DrawArm(g, body, shoulder, torsoRad, lenArm, lenFore, p.ArmR, p.ForeR, +1);
+                // 肩宽线：给出「肩膀」的宽度感
+                g.DrawLine(body, shoulderL, shoulderR);
+
+                // 颈：肩点 → 头的下缘
+                g.DrawLine(body, shoulder,
+                    new PointF((float)(head.X - Math.Sin(torsoRad) * headR * 0.2),
+                               (float)(head.Y + Math.Cos(torsoRad) * headR * 0.85)));
+
+                // 手臂（各自从肩点出发）
+                DrawArm(g, body, shoulderL, torsoRad, lenArm, lenFore, p.ArmL, p.ForeL, -1);
+                DrawArm(g, body, shoulderR, torsoRad, lenArm, lenFore, p.ArmR, p.ForeR, +1);
 
                 // 头
                 g.FillEllipse(headBrush, head.X - headR, head.Y - headR, headR * 2, headR * 2);
 
-                // 关节（髋 / 肩 / 膝）
-                float jr = Math.Max(1.5f, (float)(Sc(3) * figK));
-                g.FillEllipse(jointBrush, hip.X - jr, hip.Y - jr, jr * 2, jr * 2);
-                g.FillEllipse(jointBrush, shoulder.X - jr, shoulder.Y - jr, jr * 2, jr * 2);
-                g.FillEllipse(jointBrush, kneeL.X - jr, kneeL.Y - jr, jr * 2, jr * 2);
-                g.FillEllipse(jointBrush, kneeR.X - jr, kneeR.Y - jr, jr * 2, jr * 2);
+                // 关节（髋 / 双肩 / 双膝）
+                g.FillEllipse(jointBrush, hip.X - jointR, hip.Y - jointR, jointR * 2, jointR * 2);
+                g.FillEllipse(jointBrush, shoulderL.X - jointR, shoulderL.Y - jointR, jointR * 2, jointR * 2);
+                g.FillEllipse(jointBrush, shoulderR.X - jointR, shoulderR.Y - jointR, jointR * 2, jointR * 2);
+                g.FillEllipse(jointBrush, kneeL.X - jointR, kneeL.Y - jointR, jointR * 2, jointR * 2);
+                g.FillEllipse(jointBrush, kneeR.X - jointR, kneeR.Y - jointR, jointR * 2, jointR * 2);
             }
         }
 
