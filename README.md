@@ -55,11 +55,29 @@ EyeLite 是一个只做一件事的 Windows 托盘程序：每隔 N 分钟弹出
 
 ![多显示器效果](docs/screenshots/dual-monitor.jpg)
 
+### 动作演示
+
+久坐提醒会弹一个 720×640 的演示窗，按顺序播放动作，播完自动收窗；右上角「结束」可随时关掉。
+
+**已接入开源素材的 3 个动作**（深蹲 / 扩胸 / 原地踏步）画的是 3 帧线稿，帧间姿态差异明显：
+
+![动作演示 · 素材](docs/screenshots/04-routine-asset.png)
+
+**其余动作仍是自绘火柴人**（颈部 / 手腕 / 肩胛 / 靠墙站立 / 起身伸展 / 肩颈绕环）——
+因为开源素材库里没有对应的工位动作，硬套会演成另一个动作：
+
+![动作演示 · 自绘](docs/screenshots/05-routine-drawn.png)
+
+素材来源与许可见 [`assets/ATTRIBUTION.md`](assets/ATTRIBUTION.md)，程序内「设置 → 关于 / 致谢」也能看到。
+
 ### 设置面板
 
 <img src="docs/screenshots/settings.png" alt="EyeLite 设置面板" width="420">
 
 深色遮罩与浅色设置面板是刻意的对比：遮罩要「压住」注意力，设置面板要「好读好改」。
+
+> 本目录的截图由 `tools/shoot.py` 生成（`ctypes` + 标准库 `zlib` 手写 PNG，不依赖 PIL）。
+> 它用 `PrintWindow` 让目标窗口自绘，**不会把你桌面上的其它窗口拍进去**。
 
 ## 系统要求
 
