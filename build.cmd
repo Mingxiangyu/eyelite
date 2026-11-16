@@ -27,10 +27,11 @@ if not exist "%CSC%" goto NOCSC
 set "OUT=EyeLite.exe"
 if "%CHECK%"=="1" set "OUT=%TEMP%\eyelite-syntax-check.exe"
 
-rem /dev: build to EyeLite-dev.exe. The single-instance mutex is keyed by
-rem file name, so this binary runs alongside a user-owned EyeLite.exe
-rem without disturbing it - use it when you must verify behaviour while
-rem the user keeps working.
+rem /dev: build to EyeLite-dev.exe, so a test build never overwrites
+rem EyeLite.exe. NOTE: the single-instance mutex name is a fixed string
+rem ("EyeLite_SingleInstance_v1"), so this binary STILL shares the lock -
+rem it cannot run while any EyeLite.exe instance is up. Use it to keep
+rem the shipping file intact, not to run alongside a user session.
 if /i "%~1"=="/dev" set "OUT=EyeLite-dev.exe"
 
 echo ============================================
