@@ -2876,8 +2876,11 @@ namespace EyeLite
             this.DoubleBuffered = true;
             this.Font = Ui.FontUi;
 
+            // 高度从 640 加到 800：人物放大一倍后（用户明确要求"再大一倍"），
+            // 640 里"标题+要点"与"提示+倒计时+进度条"之间只剩 448px，
+            // 放不下 ~650px 的人形。**加高窗口、不缩小人物** —— 要的是"看得清"。
             int w = Sc(720);
-            int h = Sc(640);
+            int h = Sc(800);
             this.Size = new Size(w, h);
             CenterOnPrimary(w, h);
 
@@ -2901,6 +2904,42 @@ namespace EyeLite
         private int Sc(int px)
         {
             return (int)(px * dpiScale + 0.5f);
+        }
+
+        // ---- 演示区的纵向布局：**只在这里定义一次** ----
+        //
+        // 人物放大一倍后，标题/要点/提示/倒计时/进度条必然互相挤压。
+        // 所以三件事一起做：窗口加高到 800、地面线从底边反算、人形高度 = 地面线 - 人物上边界。
+        // 这样以后改窗口高度，人物自动跟着长，不会再把某一行的绝对坐标忘在半空中
+        // （这个坑 720x640 那次已经踩过一次：地面从 Sc(316) 挪到 Sc(512)，提示行留在 Sc(392) 压住了腿）。
+        private const int LayoutTipsBottom = 64;   // 要点文字底边（标题 14..42 + 要点 44..64）
+        private const int LayoutFigTop = 66;       // 人形可用上边界：要点下面 2px
+        private const int LayoutBottomChrome = 80; // 地面线到底边：提示(18)+倒计时(18)+进度条(6)+间距
+
+        /// <summary>脚底的 y（"地面线"）。</summary>
+        // 人形缩放系数：由 DrawFigure 每次绘制前按可用高度算出来，
+        // DrawLeg 里的偏移量用它一起放大，保证"大人物"比例一致，而不是只拉长骨头。
+        private double figK = 1.0;
+
+        /// <summary>缩放后的像素量：Sc(px) * figK（只用于人形绘制，不影响其它布局）。</summary>
+        private int Sf(int px)
+        {
+            return (int)Math.Round(Sc(px) * figK);
+        }
+
+        /// <summary>脚底的 y（"地面线"）。</summary>
+        private int FigGroundY()
+        {
+            int g = this.ClientSize.Height - Sc(LayoutBottomChrome);
+            int minG = Sc(LayoutFigTop) + Sc(120);
+            return g < minG ? minG : g;
+        }
+
+        /// <summary>人形可用的绘制高度（= 火柴人总高 = 素材墨迹目标高度）。</summary>
+        private int FigHeight()
+        {
+            int h = FigGroundY() - Sc(LayoutFigTop);
+            return h < Sc(120) ? Sc(120) : h;
         }
 
         /// <summary>
@@ -3113,12 +3152,12 @@ namespace EyeLite
             if (leftAllSec < 0) leftAllSec = 0;
 
             TextRenderer.DrawText(g, "还剩 " + leftAllSec + " 秒", Ui.FontEyebrow,
-                new Rectangle(0, Sc(590), w, Sc(18)), Ui.RingLabel,
+                new Rectangle(0, h - Sc(46), w, Sc(18)), Ui.RingLabel,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
 
             int barW = w - Sc(80);
             int barX = Sc(40);
-            int barY = Sc(612);
+            int barY = h - Sc(20);
             int barH = Math.Max(2, Sc(3));
             using (SolidBrush track = new SolidBrush(Ui.RingTrack))
             {
@@ -3141,8 +3180,9 @@ namespace EyeLite
             // 地面从 Sc(316) 挪到了 Sc(512)，而这行还留在 Sc(392) —— 于是它横穿在
             // 人物的小腿上（截图实测：素材图和火柴人都会被压住）。
             // 现在放到地面与「还剩 N 秒」之间那条空带里。
+            // 位置由"地面线"反算（h - 底边预留 + 8）：放大后地面线下移，这行自动跟着下移。
             TextRenderer.DrawText(g, "如有不适请立即停止", Ui.FontEyebrow,
-                new Rectangle(0, Sc(524), w, Sc(18)), Ui.DarkTipText,
+                new Rectangle(0, h - Sc(72), w, Sc(18)), Ui.DarkTipText,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
         }
 
@@ -3159,6 +3199,11 @@ namespace EyeLite
         //      （构建期去改 assets/ 里的文件才算改编，那条红线见 ATTRIBUTION.md。）
         //   3. 任何一步失败（资源缺失/损坏）必须返回 false → 调用方回退火柴人，**不能白屏**。
         private Bitmap[] assetFrames;      // 当前动作的 3 帧（已缩放到 side×side）
+        // 素材的「墨迹比例」（三帧里取最大/最下）：画布是 512 见方，但人物并不填满，
+        // 下蹲这类姿势底部还留 5%~6% 的透明边。按画布对齐会让脚悬空、人也不够高，
+        // 所以加载时实测一次，用它换算 side 与落地点。
+        private double assetInkHeightRatio = 0.90;       // 墨迹高 / 画布高（三帧取最大，统一缩放用）
+        private readonly double[] assetInkBottomRatio = new double[3];  // 每帧：墨迹底边到画布底边 / 画布高
         private string assetFramesKey;     // 对应的 AssetKey（null = 未加载）
 
         /// <summary>嵌入资源名，必须与 build.cmd 里的 /resource:...,名字 一致。</summary>
@@ -3178,6 +3223,8 @@ namespace EyeLite
             if (side < 16) side = 16;
 
             Bitmap[] loaded = new Bitmap[3];
+            double maxInkH = 0.0;
+            double[] bottoms = new double[3];
             for (int i = 0; i < 3; i++)
             {
                 try
@@ -3189,6 +3236,9 @@ namespace EyeLite
                     using (st)
                     using (Bitmap src = new Bitmap(st))
                     {
+                        double bottomRatio = 0.0;
+                        MeasureInkRatio(src, ref maxInkH, ref bottomRatio);
+                        bottoms[i] = bottomRatio;
                         loaded[i] = ScaleFrame(src, side);
                     }
                     if (loaded[i] == null) { DisposeFrames(loaded); return false; }
@@ -3198,7 +3248,49 @@ namespace EyeLite
 
             assetFrames = loaded;
             assetFramesKey = key;
+            // 高度用三帧最大值（统一缩放，保证下蹲时人确实变矮，而不是每帧各自拉满）；
+            // 底边**按帧**记：每帧各自把「墨迹底边」贴到地面线，脚不会踩进下面的提示文字。
+            assetInkHeightRatio = maxInkH > 0.1 ? maxInkH : 0.90;
+            for (int i = 0; i < 3; i++) assetInkBottomRatio[i] = bottoms[i];
             return true;
+        }
+
+        /// <summary>
+        /// 实测一张素材图里「人物墨迹」占画布的比例（只在加载时跑一次，隔点采样，够准且快）。
+        ///
+        /// 为什么需要实测：画布是 512 见方，但人物并不填满 —— 深蹲三帧的墨迹高只占 89%、
+        /// 底部还留 6% 透明边。按「画布高」对齐会让脚悬在半空、人形也比火柴人矮一截。
+        /// </summary>
+        private static void MeasureInkRatio(Bitmap src, ref double maxH, ref double bottomRatio)
+        {
+            try
+            {
+                int w = src.Width, h = src.Height;
+                if (w < 8 || h < 8) return;
+
+                int top = h, bot = -1;
+                for (int y = 0; y < h; y++)
+                {
+                    for (int x = 0; x < w; x += 2)
+                    {
+                        // 阈值 60 而不是 8：素材图边缘有一圈很淡的投影/抗锯齿，
+                        // 把它算进墨迹会把"最高帧"估高 4%，导致整张图被缩小（实测人形只有 74%）。
+                        if (src.GetPixel(x, y).A > 60)
+                        {
+                            if (y < top) top = y;
+                            if (y > bot) bot = y;
+                            break;
+                        }
+                    }
+                }
+                if (bot < 0 || top >= h) return;
+
+                double inkH = (bot - top + 1) / (double)h;
+                double inkBottom = (h - 1 - bot) / (double)h;
+                if (inkH > maxH) maxH = inkH;
+                bottomRatio = inkBottom;
+            }
+            catch { }
         }
 
         /// <summary>生成目标尺寸缓存位图（HighQualityBicubic 一次性缩放，之后每帧 1:1 贴图）。</summary>
@@ -3250,7 +3342,17 @@ namespace EyeLite
         /// </summary>
         private bool DrawAssetFrame(Graphics g, MoveItem item, int localMs, int w)
         {
-            int side = Sc(300);
+            // 素材画布是 512 见方，实测人物墨迹只占画布高的 89%~93%，
+            // 所以 side ≈ figH / 0.91 才能让"墨迹高度"等于 figH —— 与火柴人同高，
+            // 两条路径切换时人形不会忽大忽小。
+            int figH = FigHeight();
+            int side = (int)Math.Round(figH / (assetInkHeightRatio > 0.1 ? assetInkHeightRatio : 0.90));
+            // 画布是正方形，允许它比窗口略宽：超出的只是**透明边**，裁掉不影响人形；
+            // 反过来把它钳到窗宽，深蹲这种「墨迹只占 89%」的图就会矮一截（实测 77%）。
+            int maxSide = (int)Math.Round(figH * 1.6);
+            if (side > maxSide) side = maxSide;
+            if (side < 16) side = 16;
+
             if (!EnsureAssetFrames(item.AssetKey, side)) return false;
             if (assetFrames == null) return false;
 
@@ -3270,7 +3372,10 @@ namespace EyeLite
             if (bmp == null) return false;
 
             int x = w / 2 - side / 2;
-            int y = Sc(512) - side;     // 底边贴"地面"，与火柴人脚底同高
+            // 落地点按「墨迹底边」算，不是按画布底边：画布底部有透明边，
+            // 直接贴地面会让脚悬空 50+ px（素材路径比火柴人高出一截就是这个原因）。
+            int inkBottomPx = (int)Math.Round(side * assetInkBottomRatio[idx]);
+            int y = FigGroundY() - side + inkBottomPx;
             g.DrawImage(bmp, x, y, side, side);
             return true;
         }
@@ -3328,13 +3433,23 @@ namespace EyeLite
         private void DrawFigure(Graphics g, MovePose p, int w)
         {
             int cx = w / 2;
-            int groundY = Sc(512);
-            int lenTorso = Sc(78);
-            int lenArm = Sc(56);
-            int lenFore = Sc(48);
-            int lenThigh = Sc(70);
-            int lenShin = Sc(70);
-            int headR = Sc(22);
+            int groundY = FigGroundY();
+
+            // 人物总高 = 地面线 - 人物上边界（见 FigGroundY/FigHeight）。
+            // 基准模型在中立姿势下的总高 = 268 逻辑像素：
+            //   thigh 70 + shin 70 + torso 78 + 头直径 44 + 颈缝 6 = 268
+            // 各段统一乘 k，所以"窗口多高人形多高"；不再写死任何一段长度。
+            int figH = FigHeight();
+            double k = figH / (double)Sc(268);
+            if (k < 0.2) k = 0.2;
+            figK = k;
+
+            int lenTorso = Sf(78);
+            int lenArm = Sf(56);
+            int lenFore = Sf(48);
+            int lenThigh = Sf(70);
+            int lenShin = Sf(70);
+            int headR = Sf(22);
 
             // 下蹲：髋往下沉、膝盖往前顶。用两条腿的关节角度表达会更"真"，
             // 但对火柴人来说"髋高 + 膝点偏移"就足够读懂，且不会算错。
@@ -3347,10 +3462,10 @@ namespace EyeLite
                 (float)(hip.Y - Math.Cos(torsoRad) * lenTorso));
 
             PointF head = new PointF(
-                (float)(shoulder.X + Math.Sin(torsoRad) * (headR + Sc(6)) + p.HeadSway * Sc(14)),
-                (float)(shoulder.Y - Math.Cos(torsoRad) * (headR + Sc(6))));
+                (float)(shoulder.X + Math.Sin(torsoRad) * (headR + Sf(6)) + p.HeadSway * Sf(14)),
+                (float)(shoulder.Y - Math.Cos(torsoRad) * (headR + Sf(6))));
 
-            using (Pen body = new Pen(Ui.TimeText, Math.Max(1f, Sc(3))))
+            using (Pen body = new Pen(Ui.TimeText, Math.Max(1f, (float)(Sc(3) * figK))))
             using (SolidBrush headBrush = new SolidBrush(Ui.TimeText))
             using (SolidBrush jointBrush = new SolidBrush(Ui.Accent))
             using (Pen ground = new Pen(Ui.RingTrack, Math.Max(1f, Sc(2))))
@@ -3379,7 +3494,7 @@ namespace EyeLite
                 g.FillEllipse(headBrush, head.X - headR, head.Y - headR, headR * 2, headR * 2);
 
                 // 关节（髋 / 肩 / 膝）
-                float jr = Math.Max(1.5f, Sc(3));
+                float jr = Math.Max(1.5f, (float)(Sc(3) * figK));
                 g.FillEllipse(jointBrush, hip.X - jr, hip.Y - jr, jr * 2, jr * 2);
                 g.FillEllipse(jointBrush, shoulder.X - jr, shoulder.Y - jr, jr * 2, jr * 2);
                 g.FillEllipse(jointBrush, kneeL.X - jr, kneeL.Y - jr, jr * 2, jr * 2);
@@ -3391,12 +3506,12 @@ namespace EyeLite
         private PointF DrawLeg(Graphics g, Pen pen, PointF hip, int groundY,
                                int lenThigh, int lenShin, double crouch, double step, int side)
         {
-            float lift = (float)(step * Sc(26));
-            float kneeOut = (float)(Sc(4) + crouch * Sc(16));
-            float ankleOut = (float)(Sc(9));
+            float lift = (float)(step * Sf(26));
+            float kneeOut = (float)(Sf(4) + crouch * Sf(16));
+            float ankleOut = (float)(Sf(9));
 
             PointF knee = new PointF(hip.X + side * kneeOut,
-                                     hip.Y + lenThigh - (float)(crouch * Sc(4)) - lift * 0.55f);
+                                     hip.Y + lenThigh - (float)(crouch * Sf(4)) - lift * 0.55f);
             PointF ankle = new PointF(hip.X + side * ankleOut, groundY - lift);
 
             g.DrawLine(pen, hip, knee);
