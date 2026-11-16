@@ -2813,6 +2813,10 @@ namespace EyeLite
 
         private System.Windows.Forms.Timer anim;
         
+        // 「结束」按钮的矩形。构造期算一次（窗口尺寸固定），
+        // OnPaint 用它画、MouseClick 用它命中 —— 两处必须用**同一个**矩形，否则会"看着在这、点不到"。
+        private Rectangle closeRect;
+        
         // 测试设施：EYE_LITE_TRACE_MOVE=<文件> 时记录演示窗内部状态，用于定位"画面不动"。
         // 不设时只有一次空判断。
         private static readonly string TraceMoveFile = ReadTraceMove();
@@ -2850,6 +2854,14 @@ namespace EyeLite
             this.Size = new Size(w, h);
             CenterOnPrimary(w, h);
 
+            // 「结束」按钮：这个窗口是 WS_EX_NOACTIVATE（永不成前台），既没有按键处理也没有子控件，
+            // 用户反馈"关不掉，只能等它播完"。所以必须给一个**鼠标**出口。
+            // 它只关自己 —— 休息计时归 TrayApp 管，关窗不影响这一轮休息。
+            // 注：NOACTIVATE 只影响"是否激活窗口"，鼠标消息照常派发，所以 MouseClick 可用；
+            // 千万不要改成抢前台，那会打断用户的输入法组词。
+            closeRect = new Rectangle(w - Sc(84), Sc(14), Sc(72), Sc(26));
+            this.MouseClick += delegate(object sender, MouseEventArgs e) { OnMoveFormMouseClick(e); };
+
             try { this.Opacity = 0.96; }
             catch { }
 
@@ -2862,6 +2874,56 @@ namespace EyeLite
         private int Sc(int px)
         {
             return (int)(px * dpiScale + 0.5f);
+        }
+
+        /// <summary>
+        /// 命中「结束」就关自己；点别处什么都不做。
+        /// 三种"不要"：不抢焦点、不影响休息计时、不弹确认框（用户想关就让他关）。
+        /// </summary>
+        private void OnMoveFormMouseClick(MouseEventArgs e)
+        {
+            try
+            {
+                if (e.Button != MouseButtons.Left) return;
+                if (!closeRect.Contains(e.X, e.Y)) return;
+                this.Close();
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 顶部右侧的「结束」按钮：圆角矩形描边 + 文字，全部自绘
+        /// （本窗体没有任何子控件，加一个真按钮只会引入一层与 OnPaint 抢绘制的复杂度）。
+        /// </summary>
+        private void DrawCloseButton(Graphics g)
+        {
+            if (closeRect.Width <= 0 || closeRect.Height <= 0) return;
+
+            try
+            {
+                int r = Sc(6);
+                if (r < 2) r = 2;
+                int d = r * 2;
+
+                using (GraphicsPath path = new GraphicsPath())
+                {
+                    path.AddArc(closeRect.Left, closeRect.Top, d, d, 180, 90);
+                    path.AddArc(closeRect.Right - d, closeRect.Top, d, d, 270, 90);
+                    path.AddArc(closeRect.Right - d, closeRect.Bottom - d, d, d, 0, 90);
+                    path.AddArc(closeRect.Left, closeRect.Bottom - d, d, d, 90, 90);
+                    path.CloseFigure();
+
+                    using (Pen pen = new Pen(Ui.RingTrack, Math.Max(1f, Sc(1))))
+                    {
+                        g.DrawPath(pen, path);
+                    }
+                }
+
+                TextRenderer.DrawText(g, "结束", Ui.FontEyebrow, closeRect, Ui.EyebrowText,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.NoPrefix);
+            }
+            catch { }
         }
 
         private void CenterOnPrimary(int w, int h)
@@ -2980,6 +3042,10 @@ namespace EyeLite
 
             int w = this.ClientSize.Width;
             int h = this.ClientSize.Height;
+
+            // 「结束」按钮先画：即使这一帧没有动作可画（items 为空），窗口也必须是**可关闭**的，
+            // 否则用户就真的没有出口了。
+            DrawCloseButton(g);
 
             if (items == null || items.Count == 0) return;
             if (index < 0 || index >= items.Count) return;
@@ -4450,7 +4516,11 @@ namespace EyeLite
             lblBody.TextAlign = ContentAlignment.MiddleLeft;
             lblBody.AutoSize = false;
             lblBody.BackColor = Color.Transparent;
-            lblBody.SetBounds(Sc(20), Sc(44), w - Sc(120), Sc(30));
+            // 高度必须容得下 20pt 的行高：Ui.FontHint = 微软雅黑 20pt，96dpi 下行高约 32px，
+            // 而这里原来只给了 Sc(30) —— 下边缘必然被裁（用户反馈"左侧文字没显示全"）。
+            // 现在给 Sc(36)：y 同时从 44 上移到 42（42+36=78，按钮从 92 才开始，不会撞上）；
+            // 留出的 4px 是给 DPI 缩放后行高比略变大时的余量。别再改回 30。
+            lblBody.SetBounds(Sc(20), Sc(42), w - Sc(120), Sc(36));
             this.Controls.Add(lblBody);
 
             // ---- 三出口按钮 ----
