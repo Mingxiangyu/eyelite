@@ -1,0 +1,220 @@
+{
+  "schema": 1,
+  "generatedFor": "EyeLite G2 动作演示（由自绘火柴人改为开源素材）",
+  "fetchedAt": "2026-11-16",
+  "sources": [
+    {
+      "repo": "https://github.com/bryllim/workout-guide",
+      "license": "CC BY-SA 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "rule": "图片原样嵌入，未做任何转换/缩放/裁剪/重压缩；如将来修改，改后的图必须同样以 CC BY-SA 4.0 发布",
+      "frameSpec": "3 帧 512x512 透明 PNG（仓库内同时提供同名 SVG，本项目只用 PNG）"
+    },
+    {
+      "repo": "https://github.com/yuhonas/free-exercise-db",
+      "license": "Unlicense (public domain)",
+      "licenseUrl": "https://unlicense.org/",
+      "rule": "公有领域，可任意裁剪/抠图/调色，无义务",
+      "frameSpec": "2 帧 850x567 JPG（照片）"
+    }
+  ],
+  "totalBytes": 929258,
+  "moves": [
+    {
+      "id": "stand-reach",
+      "nameZh": "起身伸展",
+      "source": "bryllim/workout-guide",
+      "sourceSlug": "worlds-greatest-stretch",
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
+      "frameCount": 3,
+      "bytes": 73991,
+      "attribution": {
+        "creator": "Bryl Lim",
+        "creatorUrl": "https://bryllim.com",
+        "license": "CC BY-SA 4.0",
+        "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "sourceUrl": "https://github.com/bryllim/workout-guide",
+        "changes": ""
+      },
+      "note": "素材是地面弓步+上举，与「起身、手臂向上延伸」的文案不符（需趴地）"
+    },
+    {
+      "id": "squat",
+      "nameZh": "深蹲 10 次",
+      "source": "bryllim/workout-guide",
+      "sourceSlug": "bodyweight-squat",
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
+      "frameCount": 3,
+      "bytes": 116056,
+      "attribution": {
+        "creator": "Bryl Lim",
+        "creatorUrl": "https://bryllim.com",
+        "license": "CC BY-SA 4.0",
+        "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "sourceUrl": "https://github.com/bryllim/workout-guide",
+        "changes": ""
+      },
+      "note": "自体重深蹲，三帧姿势差异清楚"
+    },
+    {
+      "id": "shoulder-circles",
+      "nameZh": "肩颈绕环",
+      "source": "bryllim/workout-guide",
+      "sourceSlug": "arm-circles",
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
+      "frameCount": 3,
+      "bytes": 115309,
+      "attribution": {
+        "creator": "Bryl Lim",
+        "creatorUrl": "https://bryllim.com",
+        "license": "CC BY-SA 4.0",
+        "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "sourceUrl": "https://github.com/bryllim/workout-guide",
+        "changes": ""
+      },
+      "note": "frame1 画面里出现了杠铃（素材自身瑕疵），且是手臂绕环而非肩颈绕环"
+    },
+    {
+      "id": "march-in-place",
+      "nameZh": "原地踏步",
+      "source": "bryllim/workout-guide",
+      "sourceSlug": "high-knees",
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
+      "frameCount": 3,
+      "bytes": 112580,
+      "attribution": {
+        "creator": "Bryl Lim",
+        "creatorUrl": "https://bryllim.com",
+        "license": "CC BY-SA 4.0",
+        "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "sourceUrl": "https://github.com/bryllim/workout-guide",
+        "changes": ""
+      },
+      "note": "更接近「高抬腿跑」，比「自然踏步」激烈"
+    },
+    {
+      "id": "wall-stand",
+      "nameZh": "靠墙站立",
+      "source": "bryllim/workout-guide",
+      "sourceSlug": "wall-sit",
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
+      "frameCount": 3,
+      "bytes": 107312,
+      "attribution": {
+        "creator": "Bryl Lim",
+        "creatorUrl": "https://bryllim.com",
+        "license": "CC BY-SA 4.0",
+        "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "sourceUrl": "https://github.com/bryllim/workout-guide",
+        "changes": ""
+      },
+      "note": "素材是靠墙静蹲（屈膝），与「贴墙站直」不是同一个动作"
+    },
+    {
+      "id": "wrist-circles",
+      "nameZh": "手腕绕环",
+      "source": "yuhonas/free-exercise-db",
+      "sourceSlug": "Wrist_Circles",
+      "frames": [
+        "frame1.jpg",
+        "frame2.jpg"
+      ],
+      "frameCount": 2,
+      "bytes": 123723,
+      "attribution": {
+        "creator": "yuhonas/free-exercise-db contributors",
+        "creatorUrl": "https://github.com/yuhonas/free-exercise-db",
+        "license": "Unlicense (public domain)",
+        "licenseUrl": "https://unlicense.org/",
+        "sourceUrl": "https://github.com/yuhonas/free-exercise-db",
+        "changes": ""
+      },
+      "note": "来自 free-exercise-db：健身房彩色照片，2 帧，与线条风格不统一"
+    },
+    {
+      "id": "neck-release",
+      "nameZh": "颈部放松",
+      "source": "yuhonas/free-exercise-db",
+      "sourceSlug": "Side_Neck_Stretch",
+      "frames": [
+        "frame1.jpg",
+        "frame2.jpg"
+      ],
+      "frameCount": 2,
+      "bytes": 47368,
+      "attribution": {
+        "creator": "yuhonas/free-exercise-db contributors",
+        "creatorUrl": "https://github.com/yuhonas/free-exercise-db",
+        "license": "Unlicense (public domain)",
+        "licenseUrl": "https://unlicense.org/",
+        "sourceUrl": "https://github.com/yuhonas/free-exercise-db",
+        "changes": ""
+      },
+      "note": "来自 free-exercise-db：健身房彩色照片，2 帧，与线条风格不统一"
+    },
+    {
+      "id": "scapular-retraction",
+      "nameZh": "肩胛后缩",
+      "source": "bryllim/workout-guide",
+      "sourceSlug": "cross-body-shoulder-stretch",
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
+      "frameCount": 3,
+      "bytes": 103185,
+      "attribution": {
+        "creator": "Bryl Lim",
+        "creatorUrl": "https://bryllim.com",
+        "license": "CC BY-SA 4.0",
+        "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "sourceUrl": "https://github.com/bryllim/workout-guide",
+        "changes": ""
+      },
+      "note": "素材是单臂横跨胸前的拉伸，方向与「肩胛后缩」相反（仅姿态可参考）"
+    },
+    {
+      "id": "chest-open",
+      "nameZh": "扩胸",
+      "source": "bryllim/workout-guide",
+      "sourceSlug": "doorway-chest-stretch",
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
+      "frameCount": 3,
+      "bytes": 129734,
+      "attribution": {
+        "creator": "Bryl Lim",
+        "creatorUrl": "https://bryllim.com",
+        "license": "CC BY-SA 4.0",
+        "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "sourceUrl": "https://github.com/bryllim/workout-guide",
+        "changes": ""
+      },
+      "note": "门框胸肌拉伸，方向正确；但画面里画了门框"
+    }
+  ]
+}
