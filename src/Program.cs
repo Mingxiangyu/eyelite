@@ -6275,11 +6275,9 @@ namespace EyeLite
             fastUi.Interval = 200;
             fastUi.Tick += delegate
             {
-                try
-                {
-                    if (isResting) UpdateRestUI();
-                    else if (isPreviewing) UpdatePreviewCountdown();
-                }
+                // (d)：休息中只刷 UI；不在休息就做"到点反应"的快速快照。
+                // 见 FastDueSnapshot() 的注释：这是把"准时"从 1s tick 上解耦的落点。
+                try { FastDueSnapshot(); }
                 catch { }
             };
             fastUi.Start();
@@ -6389,6 +6387,21 @@ namespace EyeLite
                 // 单次 tick 内只取一次 NowMs()（契约 §4）：取两次会产生微小负差，
                 // 钳到 0 会让秒数来回跳。
                 long now = Clock.NowMs();
+
+                // 测试设施：EYE_LITE_TRACE_FILE 已设时，每个 1s tick 记一行 `T <Clock.NowMs()>`。
+                //
+                // 用途：**直接数出这一轮丢了几个 tick**。
+                //   相邻两行差 ≈1000ms → 没丢；
+                //   ≈2000ms / ≈3000ms → 丢了 1 个 / 2 个。
+                // 配合已有的 `lateMs`（BeginRest 入口）做交叉判定：
+                //   · latems 大 且 T 间隔正常  → 不是丢 tick，是别的原因（例如观测链路）
+                //   · latems 大 且 T 出现 2000ms 空档 → 就是丢 tick（WM_TIMER 不补发）
+                // 未设环境变量时只有一次长度判断，零 I/O。
+                if (TraceFile.Length > 0)
+                {
+                    try { TraceAppend("T " + now.ToString()); } catch { }
+                }
+
                 long dt = Clock.DeltaMs(now, lastAnchorMs);
                 long wallDelta = (long)(DateTime.UtcNow - lastTickUtc).TotalSeconds;
                 lastTickUtc = DateTime.UtcNow;
@@ -7395,8 +7408,85 @@ namespace EyeLite
             return EyeGameHints[pick];
         }
 
+        // ============================================================
+        // (d) 到点反应：从 1s tick 上解耦，挂到 200ms 的 fastUi 上
+        // ============================================================
+        //
+        // 为什么需要它：主定时器是 WinForms Timer（WM_TIMER），**不排队、不补发**。
+        // UI 线程一旦被阻塞 ≥1s（写 layered 窗口 Opacity 撞上 DWM 同步点、
+        // 托盘 Shell_NotifyIcon、GC/COM 等待……），这次 tick 就被丢弃，
+        // 之后每一次 tick 永久后移 —— 误差 = **丢失的 tick 数 × 1000ms**，离散且累积。
+        // 实测 p0a：60.5 / 62.4 / 63.5 三簇正好对应丢 0 / 1 / 2 个 tick（不是"相位差"，
+        // 相位差会在 60.5~61.5 之间连续分布）。
+        //
+        // 所以修法不是"让那一步变快"，而是"让反应不再依赖 tick 到达"：
+        // 用**绝对时刻**判断是否已过点，200ms 一次，最坏延迟 200ms，与 tick 漂移无关。
+        //
+        // 三条铁律（改之前先读）：
+        //   1. **只读累加器**。一旦在这里写 workAccumMs/sedAccumMs/lastAnchorMs，
+        //      1s tick 的 dt 会重复计算，时间会走快。
+        //   2. DeferredByActivity **每个快照最多调用一次**并复用结果 —— 它内部会推进
+        //      c3/c4 的"连续命中"起点，还会枚举前台进程（不便宜）。因此这里先看
+        //      deferUntilMs：让路进行中就直接返回，把续期留给 1s tick，
+        //      避免"让路 10 分钟里每 200ms 枚举一次进程"。
+        //   3. **不碰预告横幅**。fastUi 只在 now >= due 时才动作，而预告窗口是
+        //      left <= PreviewSeconds，**严格早于** due —— 所以它抢不到横幅，
+        //      横幅仍由 OnTick 按原时序启动。反过来，如果在这里 due 时补一个
+        //      StartPreview，下一次 200ms 就会 EndPreview + BeginRest，
+        //      横幅只闪 0.2 秒，比不弹更像 bug。
+        private void FastDueSnapshot()
+        {
+            // 休息中：fastUi 的职责只是把环上的秒数刷出来
+            if (isResting)
+            {
+                UpdateRestUI();
+                return;
+            }
+
+            if (isPreviewing) UpdatePreviewCountdown();
+
+            // 与 OnTick 同一组"不该弹"的闸门（少一个就会出现"暂停了还弹"）
+            if (paused || isSuppressed || cfg.Immersive) return;
+
+            long now = Clock.NowMs();
+
+            // 让路进行中：1s tick 会继续续期，这里不必重复问（见铁律 2）
+            if (deferUntilMs > 0 && now < deferUntilMs) return;
+
+            // 只读地反算"理论到期时刻"：lastAnchorMs 是上一个 tick 的时刻，
+            // 累加器是那一刻的值，所以 lastAnchorMs + 剩余量 = 精确的到期墙钟时刻。
+            long dueWork = long.MaxValue;
+            long dueSed = long.MaxValue;
+            if (workLimitMs > 0) dueWork = lastAnchorMs + (workLimitMs - workAccumMs);
+            if (cfg.SedentaryEnabled && sedLimitMs > 0) dueSed = lastAnchorMs + (sedLimitMs - sedAccumMs);
+
+            bool workDue = now >= dueWork;
+            bool sedDue = now >= dueSed;
+            if (!workDue && !sedDue) return;      // 绝大多数 200ms 切片在这里返回，零成本
+
+            // 到这里才问一次让路（每个快照最多一次）
+            bool deferred = DeferredByActivity(now);
+            if (deferred) return;
+
+            // 久坐优先：与 OnTick 里 sedDue 先于 workDue 的判定顺序保持一致
+            bool bodyBreak = sedDue;
+
+            if (isPreviewing) EndPreview();
+            BeginRest(bodyBreak);
+        }
+
         private void BeginRest(bool bodyBreak)
         {
+            // 重入守卫（与 EndRest 的 `if (!isResting) return;` 对称）。
+            //
+            // 为什么现在必须有：(d) 之后"到点反应"有了两个入口 —— 1s 的 OnTick 与
+            // 200ms 的 fastUi。同一 UI 线程下它们不会真正并发，但一旦哪天真并发、
+            // 或谁在 isResting 已为真时又调一次，这一轮休息会被**重新计时**
+            // （restDueMs 被改写），表现为"刚弹出来的遮罩又从头开始倒数"。
+            // 放在**最前面**还有第二个作用：重复调用不会往 trace 里多写一行 BEGIN，
+            // 否则 QA 解析 lateMs 时会看到成对的重复行。
+            if (isResting) return;
+
             // ---- p0a 追踪：理论到期时刻 vs 实际开始时刻 ----
             // 放在**最入口**：哪怕后面任何一步抛异常，这一行也已经落盘。
             // 未设 EYE_LITE_TRACE_FILE 时 TraceFile 是空串，这里只是一次长度判断，零 I/O。
