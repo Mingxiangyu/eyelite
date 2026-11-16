@@ -13,10 +13,10 @@ echo.
 
 rem --- Close running instance, otherwise the exe file is locked ---
 rem NOTE: must use findstr here, NOT find.
-rem   `find /i "EyeLite.exe"` resolves to GNU find under Git Bash / MSYS,
-rem   which prints `find: '/i': No such file or directory` and returns errorlevel=1.
-rem   The detection then silently says "not running" -> no prompt -> compile
-rem   collides with the file lock (CS0016).
+rem   The old line used find's /i switch. Under Git Bash / MSYS that name resolves
+rem   to GNU find, which prints "find: '/i': No such file or directory" and returns
+rem   errorlevel=1. The detection then silently says "not running" -> no prompt ->
+rem   compile collides with the file lock (CS0016). Seen for real.
 rem   findstr ships with Windows and is resolved inside cmd, so PATH order cannot break it.
 tasklist /fi "imagename eq EyeLite.exe" 2>nul | findstr /I "EyeLite.exe" >nul
 if errorlevel 1 goto BUILD
