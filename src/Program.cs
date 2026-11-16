@@ -6844,9 +6844,16 @@ namespace EyeLite
                     if (workDue && !deferred) { BeginRest(false); return; }
 
                     // 进预告窗口了吗？
-                    // deferred 期间不许再进预告：否则"弹出→到点被让路收掉→下一 tick 又弹"
-                    // 会变成每秒闪一次的横幅。
-                    if (!paused && !idle && !deferred && cfg.PreviewSeconds > 0)
+                    //
+                    // **不再要求 !deferred**（原来写着"deferred 期间不许再进预告"）。
+                    // 那条限制的本意是防闪：弹出 → 到点被让路收掉 → 下一 tick 又弹。
+                    // 但现在"到点被让路"已经不再收横幅了（见上面 isPreviewing 那一支），
+                    // 闪烁的成因已经消失，这条门禁只剩下副作用：
+                    //   **用户边打字边等提醒时，预告横幅从头到尾不出现** ——
+                    //   QA 实测：PreviewSeconds=3 + 持续打字，横幅 8/8 次未出现。
+                    // 而横幅是 WS_EX_NOACTIVATE、不吃焦点、不拦键盘，只是右下角一块卡片；
+                    // "正在打字"恰恰是最该提前告知"我一会儿会提醒你"的时刻。
+                    if (!paused && !idle && cfg.PreviewSeconds > 0)
                     {
                         long win = (long)cfg.PreviewSeconds * 1000L;
                         long workLeft = workLimitMs - workAccumMs;
@@ -7365,8 +7372,12 @@ namespace EyeLite
             }
             catch
             {
-                // 预告横幅出问题绝不能影响主流程：直接放弃预告，照常到点弹遮罩
+                // 预告横幅出问题绝不能影响主流程：直接放弃预告，照常到点弹遮罩。
+                // 这里必须连 previewDueMs 一起清 —— 它是"本轮预告的绝对到期时刻"，
+                // 只在第一次进窗口时算一次；留着不清，下一轮会带着上一轮的过期时刻，
+                // 表现为"第二次预告永远不出现"（QA 从现象反推出来的线索，已核）。
                 isPreviewing = false;
+                previewDueMs = 0;
             }
         }
 
