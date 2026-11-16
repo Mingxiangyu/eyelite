@@ -2548,13 +2548,20 @@ namespace EyeLite
     {
         public string Name;         // 「深蹲 10 次」
         public int Seconds;         // 名义时长（会被剩余休息时间截断）
-        public int CycleSeconds;    // 一次循环的秒数（深蹲 3 秒一次 × 10 次 = 30 秒）
+        public int CycleSeconds;    // 一次循环的秒数（深蹲 2 秒一次 × 10 次 = 20 秒）
         public string Tips;         // 一句话要点（画在窗口底部）
         public string[] Forbidden;  // 禁忌关键词（空数组 = 任何情况都不排除）
         public MovePose[] Frames;   // 一个循环内的关键帧（T 从 0 到 1）
 
+        /// <summary>
+        /// 开源素材的键（对应 assets/moves/&lt;key&gt;/ 与嵌入资源 EyeLite.res.&lt;key&gt;.N）。
+        /// **null = 没有素材，走自绘火柴人**。素材只有 3 个动作有（深蹲 / 扩胸 / 原地踏步），
+        /// 其余动作上游没有合适条目（见 assets/moves/manifest.json 的 note），继续用自绘。
+        /// </summary>
+        public string AssetKey;
+
         public MoveItem(string name, int seconds, int cycleSeconds, string tips,
-                        string[] forbidden, MovePose[] frames)
+                        string[] forbidden, MovePose[] frames, string assetKey)
         {
             this.Name = name;
             this.Seconds = seconds;
@@ -2562,6 +2569,7 @@ namespace EyeLite
             this.Tips = tips;
             this.Forbidden = forbidden == null ? new string[0] : forbidden;
             this.Frames = frames;
+            this.AssetKey = assetKey;
         }
     }
 
@@ -2631,7 +2639,7 @@ namespace EyeLite
                     new MovePose(0.70, -6, 140, 140, -12, -12, 0, 0, 0, -1.0),  // 向左侧屈
                     new MovePose(0.88, -6, 140, 140, -12, -12, 0, 0, 0, 1.0),   // 向右侧屈
                     new MovePose(1.00, 0, 8, 8, 0, 0, 0, 0, 0, 0)
-                }));
+                }, null));
 
             // 2) 深蹲 10 次：2 秒一次 × 10 次 = 20 秒（原来 30 秒/3 秒一次也是 10 次，
             //    但节奏偏慢、看不出"在做组"，所以连同周期一起压到 2 秒）。
@@ -2644,7 +2652,7 @@ namespace EyeLite
                     new MovePose(0.50, 22, 88, 88, 20, 20, 0.90, 0, 0, 0),      // 停一拍（与上帧同值）
                     new MovePose(0.75, 8, 40, 40, 8, 8, 0.35, 0, 0, 0),         // 起身中
                     new MovePose(1.00, 0, 8, 8, 0, 0, 0.00, 0, 0, 0)
-                }));
+                }, "squat"));
 
             // 3) 肩颈绕环：双臂在 60 度附近扫动 + 头部大幅左右 + 躯干轻微侧向，
             //    这样"绕环"才看得出来，而不是只有一个头在动。
@@ -2658,10 +2666,10 @@ namespace EyeLite
                     new MovePose(0.60, 0, 60, 60, 0, 0, 0, 0, 0, 0),            // 停一拍（最高点）
                     new MovePose(0.80, -3, 55, 55, -10, -10, 0, 0, 0, -1.0),    // 右侧
                     new MovePose(1.00, 0, 20, 20, 0, 0, 0, 0, 0, 0)
-                }));
+                }, null));
 
             // 4) 原地踏步：抬腿 0.85 交替，双臂**同向**摆动（反号 = 两臂一起甩）。
-            list.Add(new MoveItem("原地踏步", 30, 1, "自然呼吸，抬腿不必太高",
+            list.Add(new MoveItem("原地踏步", 30, 1, "抬到大腿接近水平，落地轻",
                 new string[] { "膝", "髋" },
                 new MovePose[]
                 {
@@ -2670,7 +2678,7 @@ namespace EyeLite
                     new MovePose(0.50, 2, 14, 14, 0, 0, 0, 0.00, 0.00, 0),
                     new MovePose(0.75, 3, 30, -30, 0, 0, 0, 0.00, 0.85, -0.2),  // 抬右腿，双臂向右甩
                     new MovePose(1.00, 2, 14, 14, 0, 0, 0, 0.00, 0.00, 0)
-                }));
+                }, "march-in-place"));
 
             // 5) 靠墙站立：静态姿势，但双臂要有呼吸起落（18 ↔ 28），否则画面像卡死。
             //    贴墙站要靠腰椎维持在轻度伸展位，所以腰椎相关词命中时也会被排除。
@@ -2682,7 +2690,7 @@ namespace EyeLite
                     new MovePose(0.45, -6, 28, 28, -6, -6, 0, 0, 0, 0),
                     new MovePose(0.60, -6, 28, 28, -6, -6, 0, 0, 0, 0),         // 吸气停一拍
                     new MovePose(1.00, -6, 18, 18, 0, 0, 0, 0, 0, 0)
-                }));
+                }, null));
 
             // 6) 手腕绕环：手臂前平举 25 度，前臂 -70 ↔ +70 往返（这才是"绕环"的可见幅度）。
             list.Add(new MoveItem("手腕绕环", 20, 2, "手臂前平举，手腕画小圈",
@@ -2694,7 +2702,7 @@ namespace EyeLite
                     new MovePose(0.50, 0, 25, 25, 0, 0, 0, 0, 0, 0),
                     new MovePose(0.75, 0, 25, 25, 70, 70, 0, 0, 0, 0),
                     new MovePose(1.00, 0, 25, 25, 0, 0, 0, 0, 0, 0)
-                }));
+                }, null));
 
             // 7) 颈部放松：头左右缓慢侧屈（不是转圈 —— 绕环对颈椎不稳的人不友好）。
             //    5 秒一个来回，两侧各停一拍：慢才安全，快就是甩脖子。
@@ -2709,7 +2717,7 @@ namespace EyeLite
                     new MovePose(0.78, 2, 8, 8, 0, 0, 0, 0, 0, 1.0),           // 向右靠
                     new MovePose(0.92, 2, 8, 8, 0, 0, 0, 0, 0, 1.0),           // 停一拍
                     new MovePose(1.00, 0, 8, 8, 0, 0, 0, 0, 0, 0)
-                }));
+                }, null));
 
             // 8) 肩胛后缩：坐姿就能做。前臂向内夹到 -70（肘向后夹紧），双臂微开 12 → 28。
             list.Add(new MoveItem("肩胛后缩", 20, 4, "坐着就行：把两侧肩胛骨向后夹，别耸肩",
@@ -2720,11 +2728,11 @@ namespace EyeLite
                     new MovePose(0.40, -3, 28, 28, -70, -70, 0, 0, 0, 0),       // 夹到最紧
                     new MovePose(0.60, -3, 28, 28, -70, -70, 0, 0, 0, 0),       // 停一拍
                     new MovePose(1.00, 0, 12, 12, 0, 0, 0, 0, 0, 0)
-                }));
+                }, null));
 
             // 9) 扩胸：双臂平举后展到 85（不是 42 —— 42 度时手臂还贴着身体），
             //    前臂外张 20，躯干轻伸 -6，胸口往前送。肩部有问题的会被禁忌词挡掉。
-            list.Add(new MoveItem("扩胸", 20, 5, "双臂向后打开，胸口往前送，别仰头",
+            list.Add(new MoveItem("扩胸", 20, 5, "双臂向后打开，胸口往前送（扶着门框或墙边都行）",
                 new string[] { "肩", "肩袖" },
                 new MovePose[]
                 {
@@ -2732,7 +2740,7 @@ namespace EyeLite
                     new MovePose(0.35, -6, 85, 85, 20, 20, 0, 0, 0, 0),         // 平举后展
                     new MovePose(0.60, -6, 85, 85, 20, 20, 0, 0, 0, 0),         // 停一拍（与上帧同值）
                     new MovePose(1.00, 0, 10, 10, 0, 0, 0, 0, 0, 0)
-                }));
+                }, "chest-open"));
 
             return list;
         }
@@ -3042,6 +3050,9 @@ namespace EyeLite
                     try { anim.Dispose(); } catch { }
                     anim = null;
                 }
+                // 素材帧是唯一"按需解码"的位图，必须在这里释放；
+                // 不释放的话每开一次演示窗就留 1MB 左右（3 张 300² ARGB）。
+                ReleaseAssetFrames();
                 items = null;
             }
             base.Dispose(disposing);
@@ -3080,12 +3091,22 @@ namespace EyeLite
                 new Rectangle(Sc(20), Sc(44), w - Sc(40), Sc(20)), Ui.EyebrowText,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
 
-            // ---- 火柴人 ----
+            // ---- 动作画面：有素材就画素材，没素材回退自绘火柴人 ----
+            // 回退是**永久保留**的安全网：颈/腕两个动作上游没有合适素材，
+            // 而且素材资源缺失/损坏时也不能白屏。
             int localMs = elapsedMs - actionStartMs;
             double cycle = item.CycleSeconds * 1000.0;
             double t = cycle <= 0 ? 0 : (localMs % cycle) / cycle;
-            MovePose pose = SamplePose(item.Frames, t);
-            DrawFigure(g, pose, w);
+
+            bool drawn = false;
+            try { drawn = DrawAssetFrame(g, item, localMs, w); }
+            catch { drawn = false; }
+
+            if (!drawn)
+            {
+                MovePose pose = SamplePose(item.Frames, t);
+                DrawFigure(g, pose, w);
+            }
 
             // ---- 底部：剩余秒数 + 进度条 + 中性提示 ----
             int leftAllSec = (budgetMs - elapsedMs + 999) / 1000;
@@ -3115,14 +3136,147 @@ namespace EyeLite
 
             // G11：这里**只**放这一句中性提示。绝不说"因为你腰不好所以跳过了 XX 动作"——
             // 那是医疗暗示，我们没资格也没能力做这个判断。
+            //
+            // 位置必须在"地面"（Sc(512)）**之下**：这条窗口从 480×420 长到 720×640 时，
+            // 地面从 Sc(316) 挪到了 Sc(512)，而这行还留在 Sc(392) —— 于是它横穿在
+            // 人物的小腿上（截图实测：素材图和火柴人都会被压住）。
+            // 现在放到地面与「还剩 N 秒」之间那条空带里。
             TextRenderer.DrawText(g, "如有不适请立即停止", Ui.FontEyebrow,
-                new Rectangle(0, Sc(392), w, Sc(18)), Ui.DarkTipText,
+                new Rectangle(0, Sc(524), w, Sc(18)), Ui.DarkTipText,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
         }
 
-        /// <summary>在关键帧之间做 ease-in-out 插值（不是每 500ms 硬切一张姿势）。</summary>
-        private static MovePose SamplePose(MovePose[] frames, double t)
+        // ============================================================
+        // 开源素材（CC BY-SA / Unlicense）—— 有素材就画素材，没素材回退自绘
+        // ============================================================
+        //
+        // 三条硬约束，改之前先读：
+        //   1. **只解码当前动作的帧**，切动作时立刻 Dispose 旧的。
+        //      512×512 ARGB 一帧解码约 1MB；9 个动作全解 = +27MB，逼近 45MB 上限。
+        //      实际策略：解码 → 立刻缩放到目标尺寸 → 释放 512 原图，常驻只有 3 张 300² 位图（约 1.1MB）。
+        //   2. **运行时缩放不算改编**。CC BY-SA 的 ShareAlike 只约束"分发改过的素材文件"；
+        //      在内存里缩放到屏幕尺寸属于显示行为，不产生衍生作品。
+        //      （构建期去改 assets/ 里的文件才算改编，那条红线见 ATTRIBUTION.md。）
+        //   3. 任何一步失败（资源缺失/损坏）必须返回 false → 调用方回退火柴人，**不能白屏**。
+        private Bitmap[] assetFrames;      // 当前动作的 3 帧（已缩放到 side×side）
+        private string assetFramesKey;     // 对应的 AssetKey（null = 未加载）
+
+        /// <summary>嵌入资源名，必须与 build.cmd 里的 /resource:...,名字 一致。</summary>
+        private static string AssetResourceName(string key, int index)
         {
+            return "EyeLite.res." + key + "." + index.ToString();
+        }
+
+        /// <summary>换成 key 对应的素材；key 相同则复用已解码的帧。失败返回 false。</summary>
+        private bool EnsureAssetFrames(string key, int side)
+        {
+            // 切到"没有素材"的动作时立刻释放上一组帧 —— 否则那 1MB 会跟着挂到下一次演示。
+            if (key == null || key.Length == 0) { ReleaseAssetFrames(); return false; }
+            if (assetFrames != null && assetFramesKey == key) return true;
+
+            ReleaseAssetFrames();
+            if (side < 16) side = 16;
+
+            Bitmap[] loaded = new Bitmap[3];
+            for (int i = 0; i < 3; i++)
+            {
+                try
+                {
+                    System.IO.Stream st = System.Reflection.Assembly.GetExecutingAssembly()
+                        .GetManifestResourceStream(AssetResourceName(key, i + 1));
+                    if (st == null) { DisposeFrames(loaded); return false; }
+
+                    using (st)
+                    using (Bitmap src = new Bitmap(st))
+                    {
+                        loaded[i] = ScaleFrame(src, side);
+                    }
+                    if (loaded[i] == null) { DisposeFrames(loaded); return false; }
+                }
+                catch { DisposeFrames(loaded); return false; }
+            }
+
+            assetFrames = loaded;
+            assetFramesKey = key;
+            return true;
+        }
+
+        /// <summary>生成目标尺寸缓存位图（HighQualityBicubic 一次性缩放，之后每帧 1:1 贴图）。</summary>
+        private static Bitmap ScaleFrame(Bitmap src, int side)
+        {
+            Bitmap dst = null;
+            try
+            {
+                dst = new Bitmap(side, side, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (Graphics g = Graphics.FromImage(dst))
+                {
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.CompositingQuality = CompositingQuality.HighQuality;
+                    // SourceCopy + 透明 Clear：素材本身带 alpha（透明背景），
+                    // 用默认的 SourceOver 会和"上一帧残留"叠在一起。
+                    g.CompositingMode = CompositingMode.SourceCopy;
+                    g.Clear(Color.Transparent);
+                    g.DrawImage(src, new Rectangle(0, 0, side, side));
+                }
+            }
+            catch
+            {
+                if (dst != null) { dst.Dispose(); dst = null; }
+            }
+            return dst;
+        }
+
+        private static void DisposeFrames(Bitmap[] frames)
+        {
+            if (frames == null) return;
+            for (int i = 0; i < frames.Length; i++)
+            {
+                if (frames[i] != null) { try { frames[i].Dispose(); } catch { } frames[i] = null; }
+            }
+        }
+
+        private void ReleaseAssetFrames()
+        {
+            DisposeFrames(assetFrames);
+            assetFrames = null;
+            assetFramesKey = null;
+        }
+
+        /// <summary>
+        /// 按乒乓序列 1 → 2 → 3 → 2 播放（首尾都落在第 1 帧，循环接缝不跳）。
+        /// **不做交叉淡入**：3 帧淡入会同时出现两个半透明人体，看起来像抖动。
+        /// 返回 false 表示这个动作没有素材（或加载失败），调用方回退火柴人。
+        /// </summary>
+        private bool DrawAssetFrame(Graphics g, MoveItem item, int localMs, int w)
+        {
+            int side = Sc(300);
+            if (!EnsureAssetFrames(item.AssetKey, side)) return false;
+            if (assetFrames == null) return false;
+
+            int cycleMs = item.CycleSeconds * 1000;
+            if (cycleMs < 1) cycleMs = 1;
+
+            int pos = localMs % cycleMs;
+            if (pos < 0) pos += cycleMs;
+
+            // 一个循环切成 4 段：0→帧1, 1→帧2, 2→帧3, 3→帧2
+            int step = (int)((long)pos * 4L / cycleMs);
+            if (step < 0) step = 0;
+            if (step > 3) step = 3;
+            int idx = (step == 3) ? 1 : step;
+
+            Bitmap bmp = assetFrames[idx];
+            if (bmp == null) return false;
+
+            int x = w / 2 - side / 2;
+            int y = Sc(512) - side;     // 底边贴"地面"，与火柴人脚底同高
+            g.DrawImage(bmp, x, y, side, side);
+            return true;
+        }
+
+        /// <summary>在关键帧之间做 ease-in-out 插值（不是每 500ms 硬切一张姿势）。</summary>
+        private static MovePose SamplePose(MovePose[] frames, double t)        {
             if (frames == null || frames.Length == 0) return new MovePose();
             if (t <= 0) return frames[0];
 
@@ -5170,6 +5324,15 @@ namespace EyeLite
             cancel.DialogResult = DialogResult.Cancel;
             this.Controls.Add(cancel);
 
+            // 「关于 / 致谢」：CC BY-SA 4.0 要求署名对**终端用户可见**，
+            // 只写在 README 里不算。放在保存/取消左边的空白区，不改变既有版式。
+            RoundButton about = new RoundButton("关于 / 致谢", Sc(8), Ui.CardBg, Ui.SecondaryHover,
+                                                Ui.LabelText, Ui.SecondaryBorder, Math.Max(1, Sc(1)));
+            about.Font = Ui.FontRowLabel;
+            about.SetBounds(Sc(24), btnY, Sc(112), Sc(38));
+            about.Click += delegate { ShowAbout(); };
+            this.Controls.Add(about);
+
             // 严格模式的实际效果取决于「允许跳过」：
             //   能跳过时 → 全吞键盘（Esc/空格就是出口）
             //   禁跳时   → 不能全吞（否则无出口死锁），只能拦系统键
@@ -5486,6 +5649,98 @@ namespace EyeLite
                 }
             };
         }
+
+        /// <summary>
+        /// 「关于 / 致谢」：展示 assets/ATTRIBUTION.md（构建时作为嵌入资源打进 exe）。
+        ///
+        /// 为什么必须做在**界面上**：CC BY-SA 4.0 要求署名对终端用户可见，
+        /// 只写在 README / 仓库里不算履行署名义务。
+        /// </summary>
+        private void ShowAbout()
+        {
+            string text = LoadAttribution();
+            try
+            {
+                Form f = new Form();
+                try
+                {
+                    f.Text = "关于 / 致谢";
+                    f.StartPosition = FormStartPosition.CenterParent;
+                    f.FormBorderStyle = FormBorderStyle.FixedDialog;
+                    f.MinimizeBox = false;
+                    f.MaximizeBox = false;
+                    f.ShowInTaskbar = false;
+                    f.BackColor = Ui.PageBg;
+                    f.Font = Ui.FontRowLabel;
+                    f.ClientSize = new Size(Sc(560), Sc(600));
+
+                    TextBox box = new TextBox();
+                    box.Multiline = true;
+                    box.ReadOnly = true;
+                    box.ScrollBars = ScrollBars.Vertical;
+                    box.WordWrap = true;
+                    box.BorderStyle = BorderStyle.None;
+                    box.BackColor = Ui.CardBg;
+                    box.ForeColor = Ui.LabelText;
+                    box.Font = Ui.FontRowLabel;
+                    box.Text = text;
+                    box.SetBounds(Sc(16), Sc(16), Sc(528), Sc(516));
+                    f.Controls.Add(box);
+
+                    RoundButton close = new RoundButton("关闭", Sc(8), Ui.PrimaryBg, Ui.PrimaryHover,
+                                                        Color.White, Color.Empty, 0);
+                    close.Font = Ui.FontRowLabel;
+                    close.SetBounds(Sc(560) - Sc(16) - Sc(96), Sc(600) - Sc(16) - Sc(38), Sc(96), Sc(38));
+                    close.DialogResult = DialogResult.OK;
+                    f.Controls.Add(close);
+                    f.AcceptButton = close;
+                    f.CancelButton = close;
+
+                    f.ShowDialog(this);
+                }
+                finally
+                {
+                    try { f.Dispose(); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>读嵌入的 ATTRIBUTION.md；读不到就退回到内置的要点版（署名义务不能因为资源缺失而消失）。</summary>
+        private static string LoadAttribution()
+        {
+            try
+            {
+                System.IO.Stream st = System.Reflection.Assembly.GetExecutingAssembly()
+                    .GetManifestResourceStream("EyeLite.res.ATTRIBUTION.md");
+                if (st != null)
+                {
+                    using (st)
+                    using (StreamReader r = new StreamReader(st, Encoding.UTF8))
+                    {
+                        string s = r.ReadToEnd();
+                        if (s != null && s.Trim().Length > 0) return s;
+                    }
+                }
+            }
+            catch { }
+            return FallbackAttribution;
+        }
+
+        private const string FallbackAttribution =
+            "动作演示图片素材署名\r\n" +
+            "\r\n" +
+            "1) bryllim/workout-guide —— CC BY-SA 4.0\r\n" +
+            "   作者：Bryl Lim（https://bryllim.com）\r\n" +
+            "   来源：https://github.com/bryllim/workout-guide\r\n" +
+            "   许可：https://creativecommons.org/licenses/by-sa/4.0/\r\n" +
+            "   改动：无（图片原样嵌入，未裁剪/缩放/改色/重压缩）\r\n" +
+            "\r\n" +
+            "2) yuhonas/free-exercise-db —— Unlicense（公有领域）\r\n" +
+            "   来源：https://github.com/yuhonas/free-exercise-db\r\n" +
+            "   许可：https://unlicense.org/\r\n" +
+            "\r\n" +
+            "若将来修改 CC BY-SA 4.0 的图片，修改后的图片也须以同一许可发布。";
 
         private void ApplyTo(AppConfig cfg)
         {
