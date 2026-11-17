@@ -251,7 +251,7 @@ namespace EyeLite
         private static extern int GetDeviceCaps(IntPtr hdc, int index);
 
         /// <summary>设置面板上显示的版本号；发布时与 git tag 同步，只改这一处。</summary>
-        public const string AppVersion = "v1.6.2";
+        public const string AppVersion = "v1.6.3";
 
         /// <summary>圆角矩形路径。调用方负责 Dispose。</summary>
         public static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -2807,7 +2807,40 @@ namespace EyeLite
             new string[] { "肩颈", "肩颈绕环", "单臂横跨胸前" },
             new string[] { "肩",   "单臂横跨胸前", "扩胸", "肩颈绕环" },
             new string[] { "腰",   "起身伸展", "深蹲 10 次", "侧弓步" },
+            // v1.6.3 补的两条：把之前只在"单动作轮换"里出现的三个动作也用进例程
+            // （靠墙静蹲 / 扶墙小腿拉伸 / 原地踏步），9 个动作至此全部有归属。
+            new string[] { "腿",   "靠墙静蹲", "扶墙小腿拉伸", "原地踏步" },
+            new string[] { "全身", "起身伸展", "扩胸", "原地踏步", "侧弓步" },
         };
+
+        /// <summary>例程在托盘菜单里的显示名：短名 + "部"；「全身」不加（"全部"会被读成"所有"）。</summary>
+        public static string RoutineMenuText(string name)
+        {
+            if (name == null) return "";
+            if (name.EndsWith("身")) return name;
+            return name + "部";
+        }
+
+        /// <summary>
+        /// 按例程名取出动作（保持表里的顺序），并**剔除被禁忌词排除的**。
+        ///
+        /// 为什么要过滤而不是"整条跳过"：一条例程里的动作是按部位配的，
+        /// 用户写了「膝」就该少做深蹲，而不是整套跟练都不给 ——
+        /// 那等于因为一个动作放弃其余几个有效动作。
+        /// 返回空列表 = 这条例程里的动作全被排除，调用方要么换一条、要么退回单动作。
+        /// </summary>
+        public static List<MoveItem> PickRoutine(string name, string contraindications)
+        {
+            List<MoveItem> raw = PickRoutine(name);
+            if (contraindications == null || contraindications.Length == 0) return raw;
+
+            List<MoveItem> kept = new List<MoveItem>();
+            for (int i = 0; i < raw.Count; i++)
+            {
+                if (!IsExcluded(raw[i], contraindications)) kept.Add(raw[i]);
+            }
+            return kept;
+        }
 
         /// <summary>按例程名取出动作（保持表里的顺序）。找不到的名字直接跳过，不抛。</summary>
         public static List<MoveItem> PickRoutine(string name)
@@ -3685,12 +3718,35 @@ namespace EyeLite
         /// 因为"Movement 启用时优先"是一条显示规则，不能因为过滤结果又回落到 Ritual，
         /// 否则用户填了禁忌词之后会意外看到另一种窗口，行为不可预期。
         /// </summary>
-        public bool ShowForRest(int restSeconds, string contraindications)
+        /// <summary>
+        /// 休息时挂动作演示窗。
+        /// routineName 非空 = 这一轮播该条**跟练例程**（按顺序播完几个动作），
+        /// 为空 = 老行为（在全部可用动作里按预算轮换）。
+        /// </summary>
+        public bool ShowForRest(int restSeconds, string contraindications, string routineName)
         {
             AllFiltered = false;
             if (!enabled) return false;
 
             Hide();     // 上一轮没关干净就扔掉
+
+            // 指定例程：先按例程取动作，再按禁忌词逐个剔除。
+            // **不是整条跳过** —— 写了「膝」只该少做深蹲，不该把整条跟练都取消。
+            if (routineName != null && routineName.Length > 0)
+            {
+                List<MoveItem> pick = MoveLib.PickRoutine(routineName, contraindications);
+                if (pick.Count > 0)
+                {
+                    try
+                    {
+                        form = new MoveForm(pick, restSeconds);
+                        form.Show();
+                    }
+                    catch { form = null; }
+                    return true;
+                }
+                // 整条被排除 → 落到下面的"随机单动作"；连单动作都没了 → 安静休息
+            }
 
             List<MoveItem> all = MoveLib.Build();
             List<MoveItem> usable = new List<MoveItem>();
@@ -3946,6 +4002,21 @@ namespace EyeLite
         // 空串 = 不排除任何动作（默认）。
         public string MovementContraindications = "";
 
+        // ---- G10：缓解例程要不要**自动**插进休息里 ----
+        //
+        // 原来三条例程只能从托盘菜单「缓解一下」手点，等于一项"想得起来才用"的功能；
+        // 而休息本身是自动来的 —— 把两者接上才成立：**每隔几次活动休息，自动播一条跟练**。
+        //
+        // 为什么按"次数"而不是"时间"：活动休息本身就是按时间间隔触发的，
+        // 再按时间算会叠加成不均匀的节奏；按次数最直观（"每 3 次活动休息跟练一次"）。
+        public bool RoutineAuto = true;
+        public int RoutineEveryN = 3;      // 每 N 次活动休息播一次；1 = 每次都播
+        public int RoutineRestCount = 0;   // 已经历的活动休息次数（跨进程保留，重启不清零）
+
+        // 例程按表里的顺序轮换（肩颈 → 肩 → 腰 → 腿 → 全身 → 肩颈 …），
+        // 不用随机：随机会连着两次都给同一个部位，而"每个部位都轮到"才是有意义的覆盖。
+        public int RoutineIndex = 0;
+
         // ---- E1 跳过配额（插件 Guard；Plugin_Guard=0 时这套逻辑完全不生效）----
         //
         // 为什么要有它：跳过是"我这次不休息"的自我谈判，一次两次是合理的，
@@ -4058,6 +4129,10 @@ namespace EyeLite
                         case "Plugin_Guard": c.Plugin_Guard = v == "1"; break;
                         // 禁忌关键词是字符串：不 Clamp；条目空白留到匹配时再 Trim
                         case "MovementContraindications": c.MovementContraindications = v; break;
+                        case "RoutineAuto": c.RoutineAuto = v == "1"; break;
+                        case "RoutineEveryN": c.RoutineEveryN = Clamp(v, 3, 1, 20); break;
+                        case "RoutineRestCount": c.RoutineRestCount = Clamp(v, 0, 0, 100000000); break;
+                        case "RoutineIndex": c.RoutineIndex = Clamp(v, 0, 0, 1000); break;
                         case "SkipQuotaPerDay": c.SkipQuotaPerDay = Clamp(v, 3, 0, 100); break;
                         case "SkipQuotaDate": c.SkipQuotaDate = v; break;
                         case "SkipQuotaUsed": c.SkipQuotaUsed = Clamp(v, 0, 0, 100); break;
@@ -4125,6 +4200,10 @@ namespace EyeLite
                 sb.AppendLine("Plugin_Movement=" + (Plugin_Movement ? "1" : "0"));
                 sb.AppendLine("Plugin_Guard=" + (Plugin_Guard ? "1" : "0"));
                 sb.AppendLine("MovementContraindications=" + MovementContraindications);
+                sb.AppendLine("RoutineAuto=" + (RoutineAuto ? "1" : "0"));
+                sb.AppendLine("RoutineEveryN=" + RoutineEveryN);
+                sb.AppendLine("RoutineRestCount=" + RoutineRestCount);
+                sb.AppendLine("RoutineIndex=" + RoutineIndex);
                 sb.AppendLine("SkipQuotaPerDay=" + SkipQuotaPerDay);
                 sb.AppendLine("SkipQuotaDate=" + SkipQuotaDate);
                 sb.AppendLine("SkipQuotaUsed=" + SkipQuotaUsed);
@@ -6436,6 +6515,7 @@ namespace EyeLite
         private ToolStripMenuItem miImmersive;
         private ToolStripMenuItem miAutoStart;
         private ToolStripMenuItem miPomodoro;      // 需要能被双击路径同步勾选状态
+        private ToolStripMenuItem miRoutineAuto;   // 「缓解一下 → 自动跟练」的勾选状态
 
         // 模式切换提示卡（进入/退出番茄钟时弹一下）。懒创建：没切过模式就一个对象都不建。
         private ModeToastForm modeToast;
@@ -6897,10 +6977,26 @@ namespace EyeLite
             // G10：按痛点的缓解例程。不依赖插件开关 —— 这是一次显式点击，
             // 用户已经表达了"我现在就要缓解"的意图，不该再被配置拦住。
             ToolStripMenuItem miRoutine = new ToolStripMenuItem("缓解一下");
+
+            // 第一项是**自动跟练开关**：例程本来只能从这里手点，等于"想得起来才用"，
+            // 而休息是自动来的 —— 接上之后每 N 次活动休息自动播一条，
+            // 这里放一个总开关（以及一个"立刻播一条"的入口在下面）。
+            miRoutineAuto = new ToolStripMenuItem("自动跟练（每 N 次活动休息）");
+            miRoutineAuto.CheckOnClick = true;
+            miRoutineAuto.Checked = cfg.RoutineAuto;
+            miRoutineAuto.Click += delegate
+            {
+                cfg.RoutineAuto = miRoutineAuto.Checked;
+                cfg.RoutineRestCount = 0;      // 重新开关 = 重新计数，立刻生效
+                cfg.Save();
+            };
+            miRoutine.DropDownItems.Add(miRoutineAuto);
+            miRoutine.DropDownItems.Add(new ToolStripSeparator());
+
             for (int ri = 0; ri < MoveLib.Routines.Length; ri++)
             {
                 string rname = MoveLib.Routines[ri][0];
-                ToolStripMenuItem ritem = new ToolStripMenuItem(rname + "部");
+                ToolStripMenuItem ritem = new ToolStripMenuItem(MoveLib.RoutineMenuText(rname));
                 string captured = rname;
                 ritem.Click += delegate { ShowRoutine(captured); };
                 miRoutine.DropDownItems.Add(ritem);
@@ -7774,12 +7870,53 @@ namespace EyeLite
         //   两者都关 → 只有遮罩
 
         /// <summary>返回 true 表示"这一轮由 Movement 接管"，调用方据此跳过 Ritual。</summary>
-        private bool ShowMovementForRest(int restSeconds)
+        private bool ShowMovementForRest(int restSeconds, string routineName)
         {
             MovementPlugin p = PluginHost.Get("Movement") as MovementPlugin;
             if (p == null) return false;
-            try { return p.ShowForRest(restSeconds, cfg.MovementContraindications); }
+            try { return p.ShowForRest(restSeconds, cfg.MovementContraindications, routineName); }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// 这一轮活动休息要不要播跟练例程；要播就返回例程名，否则 null（退回单动作轮换）。
+        ///
+        /// 计数与轮换指针都落在配置里，重启不清零 —— 否则每次开机都从"肩颈"重新开始，
+        /// 用户永远只见过第一条例程。
+        /// </summary>
+        private string RoutineForThisRest()
+        {
+            try
+            {
+                cfg.RoutineRestCount++;
+
+                int n = cfg.RoutineEveryN;
+                if (n < 1) n = 1;
+                bool play = cfg.RoutineAuto && (cfg.RoutineRestCount % n == 0);
+                if (!play) { cfg.Save(); return null; }
+
+                int total = MoveLib.Routines.Length;
+                if (total <= 0) { cfg.Save(); return null; }
+
+                // 顺序轮换，并跳过"整条都被禁忌词排除"的例程：
+                // 用户写了「膝」「肩」，肩颈/肩/腰/腿 都可能被整条清空，
+                // 不跳过的话会白转一圈还是播不出东西。
+                for (int tries = 0; tries < total; tries++)
+                {
+                    int idx = cfg.RoutineIndex % total;
+                    if (idx < 0) idx = 0;
+                    string name = MoveLib.Routines[idx][0];
+                    cfg.RoutineIndex = idx + 1;
+                    if (MoveLib.PickRoutine(name, cfg.MovementContraindications).Count > 0)
+                    {
+                        cfg.Save();
+                        return name;
+                    }
+                }
+                cfg.Save();
+                return null;
+            }
+            catch { return null; }
         }
 
         private void HideMovement()
@@ -8451,7 +8588,7 @@ namespace EyeLite
             if (bodyBreak)
             {
                 bool takenByMovement = false;
-                try { takenByMovement = ShowMovementForRest(restTotalSeconds); } catch { }
+                try { takenByMovement = ShowMovementForRest(restTotalSeconds, RoutineForThisRest()); } catch { }
                 if (!takenByMovement)
                 {
                     try { ShowRitualForRest(); } catch { }
@@ -9022,7 +9159,9 @@ namespace EyeLite
         {
             try
             {
-                List<MoveItem> pick = MoveLib.PickRoutine(name);
+                // 手点例程与自动播例程走**同一套禁忌过滤**：
+                // 否则会出现"自动播的时候少了深蹲、手点的时候照做"这种不一致。
+                List<MoveItem> pick = MoveLib.PickRoutine(name, cfg.MovementContraindications);
                 if (pick.Count == 0) return;
 
                 int total = 0;
