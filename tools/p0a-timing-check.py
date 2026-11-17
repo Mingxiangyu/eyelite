@@ -293,7 +293,8 @@ CFG_ORDER = ['WorkMinutes', 'RestSeconds', 'PomodoroEnabled', 'PomodoroWork',
              'PomodoroRest', 'AllowSkip', 'PostponeMinutes', 'IdleMinutes',
              'SoundEnabled', 'StrictMode', 'StartWithWindows', 'PreviewSeconds',
              'SedentaryEnabled', 'SedentaryMinutes', 'SedentarySeconds',
-             'CameraCountEnabled', 'SuppressOnFullscreen', 'DimAlphaMax']
+             'CameraCountEnabled', 'SuppressOnFullscreen', 'DimAlphaMax',
+             'TypingGuardEnabled']
 
 
 def read_cfg_raw():
@@ -329,8 +330,11 @@ def write_cfg(d):
     # 踩过一次：p0d 的对照组用 EYE_LITE_FAKE_IDLE_MS=0 伪造"人就在"，
     # 结果 idle 恒为 0 → C4 一直判"正在打字" → 遮罩被推到 60s 之后，对照组直接失效。
     d = dict(d)
-    d['ForegroundGuardEnabled'] = '0'
-    d['TypingGuardEnabled'] = '0'
+    # 默认把两个守卫关掉（本脚本量的是"计时精度"，守卫另有脚本验）。
+    # 但 --typing-guard 时不要覆盖调用方显式给的值 —— 否则开关"看起来支持、实际无效"。
+    if '--typing-guard' not in sys.argv:
+        d['ForegroundGuardEnabled'] = '0'
+        d['TypingGuardEnabled'] = '0'
     if not os.path.isdir(CFG_DIR):
         os.makedirs(CFG_DIR)
     with open(CFG, 'w', encoding='utf-8') as f:
@@ -376,18 +380,57 @@ def main():
     raw = read_cfg_raw()
     orig = read_cfg()
     cfg = dict(orig)
-    cfg.update({'WorkMinutes': '1', 'RestSeconds': '8', 'PreviewSeconds': '0',
-                'PomodoroEnabled': '0', 'IdleMinutes': '0',
-                'SedentaryEnabled': '0', 'SoundEnabled': '0'})
+    # --noskip：把 AllowSkip 设 0。为什么需要它：
+    # 用户在场时按空格/Esc 会**合法地**结束休息（AllowSkip=1 + StrictMode=0），
+    # 于是"休息时长"这条指标会被打断成 0.8~2.9s，看起来像缺陷。
+    # 2026-11-17 实测：10 轮里 7 轮这样被打断（trace 的休息倒计时停在 8/7/6，idle@到点 0~297ms）。
+    noskip = ('--noskip' in sys.argv)
+    # --require-idle <ms>：每轮开始前要求"机器已空闲 ≥ N ms"。
+    # 为什么需要：`AllowSkip=0` 时遮罩 8 秒内**无法关闭**，若用户此刻回来用电脑，
+    # 会被强制全屏挡 8 秒 × 每轮一次。这条把"打扰用户"变成可预防的：
+    # 先等机器安静下来再开这一轮；等不到就放弃并如实报"未跑满"。
+    require_idle = 0
+    for i, a in enumerate(sys.argv):
+        if a == '--require-idle' and i + 1 < len(sys.argv):
+            try:
+                require_idle = int(sys.argv[i + 1])
+            except ValueError:
+                require_idle = 0
+    over = {'WorkMinutes': '1', 'RestSeconds': '8', 'PreviewSeconds': '0',
+            'PomodoroEnabled': '0', 'IdleMinutes': '0',
+            'SedentaryEnabled': '0', 'SoundEnabled': '0'}
+    if noskip:
+        over['AllowSkip'] = '0'
+        over['StrictMode'] = '0'      # 不要顺手开严格模式：它会锁键盘，改变被测行为
+    # TypingGuardEnabled 默认钉 0：p0a 原来只覆盖 6 个键，不碰它；而用户配置里是 1，
+    # 于是"用户一打字 → DeferredByActivity 让路 → 到点被拉长"，会把核心计时和
+    # "用户在场"两个因素混在一起（上一批 idle@到点 0~63ms 的那几轮就是这么来的）。
+    # 要让 p0a 测"用户在场时的真实体验"，显式传 --typing-guard。
+    over['TypingGuardEnabled'] = '1' if ('--typing-guard' in sys.argv) else '0'
+    cfg.update(over)
     write_cfg(cfg)
     print('[env] config: WorkMinutes=1 RestSeconds=8 PreviewSeconds=0 '
-          'IdleMinutes=0（脚本自备前置，结束按原始字节还原）')
+          'IdleMinutes=0%s（脚本自备前置，结束按原始字节还原）'
+          % ('' if not noskip else ' AllowSkip=0（--noskip：空格/Esc 不能结束休息）'))
+    print('[env] AllowSkip=%s StrictMode=%s TypingGuardEnabled=%s'
+          '（TypingGuard=0 表示测"核心计时"，=1 表示含"用户打字让路"）'
+          % (cfg.get('AllowSkip'), cfg.get('StrictMode'), cfg.get('TypingGuardEnabled')))
 
     results = []
     artifact_changed = [False]
     try:
         for rnd in range(1, rounds + 1):
             print('\n=========== 第 %d 轮 ===========' % rnd)
+            if require_idle > 0:
+                t_wait = time.time()
+                while time.time() - t_wait < 180:
+                    if idle_ms() >= require_idle:
+                        break
+                    time.sleep(2.0)
+                else:
+                    print('  [ENOUGH] 等待 180s 仍未空闲，停止，不打扰用户')
+                    break
+                print('  [gate] 开跑前空闲已达标（用户应已离开）')
             sig_before = exe_sig()
             stop_eyelite()
 
