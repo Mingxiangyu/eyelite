@@ -4567,15 +4567,87 @@ namespace EyeLite
         private bool lockCountdownOn;       // 主提示位当前是否在显示锁定倒计时
         private int lockCountdownShown = -1; // 上一次显示的秒数（值没变就不动 Label，tick 路径零churn）
 
-        // DPI 缩放因子（1.0 = 96dpi）。所有物理像素版式常量都过 Sc()，
-        // 让任何 DPI 下"字体高度 : 盒子高度"的比值恒定，文字不会被裁。
-        private float dpiScale = 1f;
+        // ---- 布局比例：按**屏幕占比**，不按 DPI ----
+        //
+        // 设计基准 = 1920×1080（96dpi、100% 缩放时的逻辑屏幕）。
+        //   1080p@100%  → k = 1.00
+        //   4K@150%     → 逻辑 2560×1440 → k = 1.33
+        //   4K@100%     → k = 2.00
+        //   1366×768    → k = 0.71
+        // 这样"圆环占屏幕多宽"在任何机器上都一样，换电脑不用改代码。
+        //
+        // 以前用 dpiScale（=物理DPI/96）当系数，在 4K@150% 下 k=1.5，
+        // 但屏幕逻辑宽度只有 2560 —— 元素相对屏幕偏大 12%，且换一块缩放比不同的屏就全乱。
+        private const int DesignW = 1920;
+        private const int DesignH = 1080;
+
+        private float k = 1f;         // 布局比例（屏幕逻辑尺寸 / 设计基准）
+        private float dpiScale = 1f;  // 仅用于"把 pt 换算成实际像素"时抵消系统缩放
+
+        // 字体必须跟 k 走，不能跟 dpiScale 走：
+        //   Font 的 pt 会被系统按 dpiScale 放大，而元素的 px 按 k 放大。
+        //   要让"字 : 盒子"的比例恒定，pt 得乘 k / dpiScale。
+        private Dictionary<int, Font> fontCache;
+
+        private Font F(float basePt)
+        {
+            if (fontCache == null) fontCache = new Dictionary<int, Font>();
+            int key = (int)(basePt * 10);
+            Font f;
+            if (fontCache.TryGetValue(key, out f)) return f;
+
+            float pt = basePt * k / (dpiScale <= 0f ? 1f : dpiScale);
+            if (pt < 4f) pt = 4f;
+            if (pt > 96f) pt = 96f;
+            try { f = new Font("微软雅黑", pt, FontStyle.Regular); }
+            catch { f = SystemFonts.DefaultFont; }
+            fontCache[key] = f;
+            try
+            {
+                string tf = Environment.GetEnvironmentVariable("EYE_LITE_TRACE_FONT");
+                if (tf != null && tf.Length > 0)
+                {
+                    System.IO.File.AppendAllText(tf,
+                        "base=" + basePt + " k=" + k + " dpi=" + dpiScale
+                        + " pt=" + pt + " family=" + f.FontFamily.Name
+                        + " size=" + f.SizeInPoints + Environment.NewLine);
+                }
+            }
+            catch { }
+            return f;
+        }
+
+        private static float CalcK(Screen s, float dpi)
+        {
+            try
+            {
+                Rectangle b = s.Bounds;
+                if (b.Width <= 0 || b.Height <= 0) return 1f;
+
+                // **必须先还原成逻辑尺寸**。
+                // `Screen.Bounds` 在本进程（system-aware）里对主屏返回的是**物理像素**
+                // （4K@150% → 3840×2160），直接拿去除以 1920 会得到 k=2，
+                // 元素比设计大 33%（实测就是这么炸的：圆环顶到屏幕边、字撑满）。
+                // 物理 ÷ dpiScale = 该屏在 100% 缩放下的等效尺寸，这才是设计基准要对比的量。
+                if (dpi <= 0f) dpi = 1f;
+                float w = b.Width / dpi;
+                float h = b.Height / dpi;
+
+                float kx = w / (float)DesignW;
+                float ky = h / (float)DesignH;
+                float v = kx < ky ? kx : ky;
+                if (v < 0.5f) v = 0.5f;
+                if (v > 4f) v = 4f;
+                return v;
+            }
+            catch { return 1f; }
+        }
 
         // 用 +0.5f 截断而非 Math.Round：后者是银行家舍入（Math.Round(1.5)=2、Math.Round(2.5)=2），
         // 在 1.25 / 1.5 这类缩放上会出现按值取偶导致的 ±1px 抖动。
         private int Sc(int px)
         {
-            return (int)(px * dpiScale + 0.5f);
+            return (int)(px * k + 0.5f);
         }
 
         public event EventHandler RequestSkip;
@@ -4588,6 +4660,7 @@ namespace EyeLite
         {
             // 必须在算任何版式之前取到 DPI 因子（此时窗体还没有句柄）
             dpiScale = Ui.Scale;
+            k = CalcK(screen, dpiScale);
 
             this.allowSkip = allowSkip;
             this.showButtons = withButtons;
@@ -4640,9 +4713,17 @@ namespace EyeLite
             bool hasButtons = allowSkip && showButtons;
 
             // 环直径：屏幕短边的 30%，夹在 Sc(220) ~ Sc(400)
-            int ringD = (int)(Math.Min(w, h) * 0.30);
-            if (ringD < Sc(220)) ringD = Sc(220);
-            if (ringD > Sc(400)) ringD = Sc(400);
+            // 圆环直径 = 屏幕短边的 30%，**夹取边界也按比例**，不再用 Sc(220)/Sc(400) 这种绝对像素。
+            //
+            // 原来上限写 Sc(400)：在 4K@150% 下等于 533，而 0.30×2160=648 被它卡住 ——
+            // 圆环只占屏幕 24.7%，与设计意图的 30% 不符，而且换个分辨率比例就变。
+            // 改成短边的 18%~42% 之后，"占屏幕多少"在任何机器上都一致。
+            int shortSide = Math.Min(w, h);
+            int ringD = (int)(shortSide * 0.30);
+            int ringMin = (int)(shortSide * 0.18);
+            int ringMax = (int)(shortSide * 0.42);
+            if (ringD < ringMin) ringD = ringMin;
+            if (ringD > ringMax) ringD = ringMax;
 
             int eyebrowH = Sc(22);   // 12pt 行高约 21px（96dpi），给 22 才不会切下缘
             int gapEyebrowRing = Sc(28);
@@ -4699,7 +4780,7 @@ namespace EyeLite
             lblEyebrow = new Label();
             lblEyebrow.Text = "休息一下";
             lblEyebrow.ForeColor = Ui.EyebrowText;
-            lblEyebrow.Font = Ui.FontRestEyebrow;
+            lblEyebrow.Font = F(12f);
             lblEyebrow.TextAlign = ContentAlignment.MiddleCenter;
             lblEyebrow.AutoSize = false;
             lblEyebrow.BackColor = Color.Transparent;
@@ -4707,7 +4788,7 @@ namespace EyeLite
             this.Controls.Add(lblEyebrow);
 
             // 环 + 数字是一个不可分割的整体：数字画在环心，不再用独立 Label
-            ring = new RingMeter(ringD, dpiScale);
+            ring = new RingMeter(ringD, k);      // 传布局比例，不传 DPI：环内偏移也按屏幕占比
             ring.SetBounds((w - ringD) / 2, yRing, ringD, ringD);
             // 把父窗体的背景 brush 借给子控件复刻背景（含光晕），彻底消除纯色方块的硬边。
             // 所有权仍在 RestForm，RingMeter 不释放。
@@ -4717,7 +4798,7 @@ namespace EyeLite
             lblHint = new Label();
             lblHint.Text = "让眼睛看看 6 米外的东西，放松睫状肌";
             lblHint.ForeColor = Ui.HintText;
-            lblHint.Font = Ui.FontHint;
+            lblHint.Font = F(20f);
             lblHint.TextAlign = ContentAlignment.MiddleCenter;
             lblHint.AutoSize = false;
             lblHint.BackColor = Color.Transparent;
@@ -4727,7 +4808,7 @@ namespace EyeLite
             lblTip = new Label();
             lblTip.Text = "眨眼 · 远眺 · 深呼吸";
             lblTip.ForeColor = Ui.DarkTipText;
-            lblTip.Font = Ui.FontTip;
+            lblTip.Font = F(11f);
             lblTip.TextAlign = ContentAlignment.MiddleCenter;
             lblTip.AutoSize = false;
             lblTip.BackColor = Color.Transparent;
@@ -4773,7 +4854,7 @@ namespace EyeLite
                 btnSkip = new RoundButton(skipTextNormal, Sc(21),
                                           Ui.DarkBtnBg, Ui.DarkBtnHover,
                                           Ui.SkipText, Ui.Accent, bw);
-                btnSkip.Font = Ui.FontRowLabel;
+                btnSkip.Font = F(10.5f);
                 btnSkip.SetBounds(skipX, yBtn, skipW, btnH);
                 btnSkip.Click += delegate
                 {
@@ -4788,7 +4869,7 @@ namespace EyeLite
                     RoundButton btnSit = new RoundButton("坐一分钟", Sc(21),
                                                          Ui.DarkBtnBg, Ui.DarkBtnHover,
                                                          Ui.SkipText, Ui.Accent, bw);
-                    btnSit.Font = Ui.FontRowLabel;
+                    btnSit.Font = F(10.5f);
                     btnSit.SetBounds(sitX, yBtn, sitW, btnH);
                     btnSit.Click += delegate
                     {
@@ -4800,7 +4881,7 @@ namespace EyeLite
                 RoundButton btnPostpone = new RoundButton("推迟 " + postponeMinutes + " 分钟", Sc(21),
                                                           Ui.DarkBtnBg, Ui.DarkBtnHover,
                                                           Ui.DarkBtnText, Ui.DarkBtnBorder, bw);
-                btnPostpone.Font = Ui.FontRowLabel;
+                btnPostpone.Font = F(10.5f);
                 btnPostpone.SetBounds(postX, yBtn, postW, btnH);
                 btnPostpone.Click += delegate
                 {
@@ -5032,6 +5113,13 @@ namespace EyeLite
                 if (ring != null) ring.SetBackdrop(null, null, Rectangle.Empty, Size.Empty);
                 if (bgBrush != null) { bgBrush.Dispose(); bgBrush = null; }
                 if (glowBrush != null) { glowBrush.Dispose(); glowBrush = null; }
+                // 字体缓存也要放：F() 按 k 动态建字体，不放就是每开一次遮罩泄漏一批 GDI 对象
+                if (fontCache != null)
+                {
+                    foreach (Font ff in fontCache.Values) { try { ff.Dispose(); } catch { } }
+                    fontCache.Clear();
+                    fontCache = null;
+                }
             }
             base.Dispose(disposing);
         }
