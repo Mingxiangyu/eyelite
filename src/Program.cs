@@ -156,6 +156,9 @@ namespace EyeLite
         public static readonly Font FontTitle = new Font("微软雅黑", 19f, FontStyle.Bold);        // 设置页主标题
         public static readonly Font FontRingLabel = new Font("微软雅黑", 12f, FontStyle.Regular); // 环心「剩余」
         public static readonly Font FontRowLabel = new Font("微软雅黑", 10.5f, FontStyle.Regular);
+        // 设置页数值框专用：10.5pt 在 88px 宽的框里看着"很小、只占右边一小条"，
+        // 与标签同字号也分不出"这是要填的数"。12pt 是 24px 高的输入框在不裁字的前提下能放下的最大档。
+        public static readonly Font FontNumInput = new Font("微软雅黑", 12f, FontStyle.Regular);
         public static readonly Font FontMenu = new Font("微软雅黑", 9.5f);
         public static readonly Font FontUi = new Font("微软雅黑", 10f);
 
@@ -5227,6 +5230,179 @@ namespace EyeLite
     }
 
     // ================================================================
+    // 5.4 模式切换提示卡（进入 / 退出番茄钟时弹一下）
+    // ================================================================
+    //
+    // 为什么需要它：双击托盘图标切模式时，界面上**几乎没有任何变化**
+    // （只有图标配色和 tooltip 换了），用户会以为"双击没反应"，
+    // 然后去菜单里翻——这正是用户反馈"双击不是我想的那个意思"的来源。
+    //
+    // 造型与预告横幅同一套（深色圆角卡片、右下角），但**没有倒计时**：
+    // 它不是"到点提醒"，而是"我刚做了一个操作，这是结果"。
+    //
+    // 三条安全要求与预告横幅一致：
+    //   · 不抢焦点：WS_EX_NOACTIVATE + ShowWithoutActivation
+    //   · 不进 Alt+Tab / 不占任务栏：WS_EX_TOOLWINDOW + ShowInTaskbar=false
+    //   · 30 秒自动关闭：没人点也别留一张卡片挂在屏幕上
+    internal class ModeToastForm : Form
+    {
+        private Label lblTitle;
+        private Label lblBody;
+        private RoundButton btnOk;
+        private Timer autoTimer;
+        private float dpiScale;
+
+        /// <summary>点了唯一那个按钮（「开始专注」/「知道了」）。</summary>
+        public event EventHandler RequestAccept;
+
+        public ModeToastForm()
+        {
+            dpiScale = Ui.DetectScale(this);
+
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.StartPosition = FormStartPosition.Manual;
+            this.ShowInTaskbar = false;
+            this.TopMost = true;
+            this.BackColor = Ui.GradTop;
+            this.AutoScaleMode = AutoScaleMode.None;
+            this.DoubleBuffered = true;
+            this.Font = Ui.FontUi;
+
+            int w = Sc(420);
+            int h = Sc(116);
+
+            lblTitle = new Label();
+            lblTitle.Font = Ui.FontRestEyebrow;      // 12pt，与遮罩眉标同一档
+            lblTitle.ForeColor = Ui.TimeText;
+            lblTitle.BackColor = Color.Transparent;
+            lblTitle.AutoSize = false;
+            lblTitle.TextAlign = ContentAlignment.MiddleLeft;
+            lblTitle.SetBounds(Sc(20), Sc(14), w - Sc(40), Sc(26));
+            this.Controls.Add(lblTitle);
+
+            lblBody = new Label();
+            lblBody.Font = Ui.FontTip;               // 11pt
+            lblBody.ForeColor = Ui.HintText;
+            lblBody.BackColor = Color.Transparent;
+            lblBody.AutoSize = false;
+            lblBody.TextAlign = ContentAlignment.MiddleLeft;
+            lblBody.SetBounds(Sc(20), Sc(42), w - Sc(40), Sc(26));
+            this.Controls.Add(lblBody);
+
+            btnOk = new RoundButton("知道了", Sc(15),
+                                    Ui.DarkBtnBg, Ui.DarkBtnHover,
+                                    Ui.SkipText, Ui.Accent, Math.Max(1, Sc(1)));
+            btnOk.Font = Ui.FontRowLabel;
+            btnOk.SetBounds(w - Sc(20) - Sc(120), Sc(72), Sc(120), Sc(32));
+            btnOk.Click += delegate
+            {
+                if (RequestAccept != null) RequestAccept(this, EventArgs.Empty);
+                CloseToast();
+            };
+            this.Controls.Add(btnOk);
+
+            this.Size = new Size(w, h);
+        }
+
+        private int Sc(int px)
+        {
+            return (int)(px * dpiScale + 0.5f);
+        }
+
+        /// <summary>距工作区边缘的缩进（已含 DPI 缩放），与预告横幅同一档。</summary>
+        public int MarginPx
+        {
+            get { return Sc(24); }
+        }
+
+        // 圆角与预告横幅一致（Region 裁形），否则同一角落两张卡一个圆角一个直角，很跳。
+        private GraphicsPath shapePath;
+        private Size shapeSize = Size.Empty;
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            RebuildShape();
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            RebuildShape();
+        }
+
+        private void RebuildShape()
+        {
+            Size s = this.ClientSize;
+            if (s.Width <= 4 || s.Height <= 4) return;
+            if (shapePath != null && shapeSize.Width == s.Width && shapeSize.Height == s.Height) return;
+
+            int r = Sc(12);
+            int maxR = Math.Min(s.Width, s.Height) / 2 - 1;
+            if (r > maxR) r = maxR;
+            if (r < 2) r = 2;
+
+            if (shapePath != null) { shapePath.Dispose(); shapePath = null; }
+            shapeSize = s;
+            shapePath = Ui.RoundedRect(new Rectangle(0, 0, s.Width - 1, s.Height - 1), r);
+
+            Region old = this.Region;
+            this.Region = new Region(shapePath);
+            if (old != null) old.Dispose();
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000;   // WS_EX_NOACTIVATE：不抢焦点
+                cp.ExStyle |= 0x00000080;   // WS_EX_TOOLWINDOW：不进 Alt+Tab
+                return cp;
+            }
+        }
+
+        public void ShowToast(string title, string body, string buttonText,
+                              int x, int y, int autoCloseMs)
+        {
+            lblTitle.Text = title;
+            lblBody.Text = body;
+            btnOk.Text = buttonText;
+            this.Location = new Point(x, y);
+            this.Show();
+
+            if (autoTimer != null) { autoTimer.Stop(); autoTimer.Dispose(); }
+            autoTimer = new Timer();
+            autoTimer.Interval = autoCloseMs;
+            autoTimer.Tick += delegate { autoTimer.Stop(); CloseToast(); };
+            autoTimer.Start();
+        }
+
+        /// <summary>收卡片（重复调用安全）。只在"有人点"或"超时"时调，不动任何计时状态。</summary>
+        public void CloseToast()
+        {
+            if (autoTimer != null)
+            {
+                try { autoTimer.Stop(); } catch { }
+                try { autoTimer.Dispose(); } catch { }
+                autoTimer = null;
+            }
+            try { if (this.Visible) this.Hide(); } catch { }
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (autoTimer != null) { try { autoTimer.Stop(); } catch { } }
+            base.OnFormClosing(e);
+        }
+    }
+
+    // ================================================================
     // 5.5 渐进降饱和遮罩（A2：休息前 60 秒整体渐暗）
     // ================================================================
     //
@@ -5443,7 +5619,9 @@ namespace EyeLite
         private const int FirstRowTop = 38;
         private const int RowHeight = 32;       // 所有行（复选 / 数值）统一 32
         private const int CheckHeight = 26;
-        private const int NumWidth = 96;
+        // 96 时框内左侧大片空白、数字挤在最右一窄条，视觉占比很怪（用户反馈）。
+        // 80 刚好够 "120" 三个字 + 上下箭头，左侧不再留空。
+        private const int NumWidth = 80;
         private const int NumHeight = 24;
         private const int Gap = 12;
 
@@ -5933,7 +6111,7 @@ namespace EyeLite
             n.Minimum = min;
             n.Maximum = max;
             n.Value = val;
-            n.Font = Ui.FontRowLabel;
+            n.Font = Ui.FontNumInput;     // 比标签大一号，见 FontNumInput 的注释
             n.BorderStyle = BorderStyle.None;
             n.TextAlign = HorizontalAlignment.Right;
             n.BackColor = Ui.InputBg;
@@ -6251,6 +6429,10 @@ namespace EyeLite
         private ToolStripMenuItem miPause;
         private ToolStripMenuItem miImmersive;
         private ToolStripMenuItem miAutoStart;
+        private ToolStripMenuItem miPomodoro;      // 需要能被双击路径同步勾选状态
+
+        // 模式切换提示卡（进入/退出番茄钟时弹一下）。懒创建：没切过模式就一个对象都不建。
+        private ModeToastForm modeToast;
         private System.Windows.Forms.Timer timer;
 
         private bool paused = false;
@@ -6579,6 +6761,13 @@ namespace EyeLite
         // 这是唯一稳定的自动化入口。**生产环境禁设**；不设时下面一行都不会执行。
         private static readonly bool OpenSettingsOnStart = ReadOpenSettings();
 
+        // 测试设施：EYE_LITE_TOGGLE_POMODORO=1 时启动即切一次番茄钟模式，
+        // 用来截「双击托盘」后的那张提示卡 —— 托盘图标的双击没法用脚本稳定注入
+        // （Win11 的图标可能被折叠进溢出面板），这是唯一可自动化的入口。
+        // 不设时零影响；生产环境不要设。
+        private static readonly bool TogglePomodoroOnStart =
+            Environment.GetEnvironmentVariable("EYE_LITE_TOGGLE_POMODORO") == "1";
+
         private static bool ReadOpenSettings()
         {
             try { return Environment.GetEnvironmentVariable("EYE_LITE_OPEN_SETTINGS") == "1"; }
@@ -6662,17 +6851,10 @@ namespace EyeLite
             // 托盘里也能直接切番茄钟：设置页要多点三次才能到，而这是高频开关。
             // 只改配置 + 重建窗体签名，不碰计时状态机（休息中不动，工作剩余时长在
             // ResetWork 里按新的 WorkTotalSeconds 重算）。
-            ToolStripMenuItem miPomodoro = new ToolStripMenuItem("番茄钟模式");
+            miPomodoro = new ToolStripMenuItem("番茄钟模式");
             miPomodoro.CheckOnClick = true;
             miPomodoro.Checked = cfg.PomodoroEnabled;
-            miPomodoro.Click += delegate
-            {
-                cfg.PomodoroEnabled = miPomodoro.Checked;
-                cfg.Save();
-                screenSignature = "";      // 参数变了，下次休息重建窗体（换配色）
-                if (!isResting) ResetWork();
-                UpdateTrayText();
-            };
+            miPomodoro.Click += delegate { SetPomodoroMode(miPomodoro.Checked); };
             menu.Items.Add(miPomodoro);
 
             // 沉浸模式：与「暂停」并列，但语义相反 —— 暂停不记账，沉浸记账。
@@ -6735,7 +6917,17 @@ namespace EyeLite
             menu.Items.Add(miExit);
 
             tray.ContextMenuStrip = menu;
-            tray.DoubleClick += delegate { IfWorkingStartRest(); };
+            // 双击托盘 = 进入 / 退出番茄钟模式（对齐 ProjectEye 的手感）。
+            //
+            // 以前这里是"立即休息"。用户反馈：想休息直接站起来就行，双击弹一个
+            // 全屏遮罩反而是打扰；而他真正想按双击做的事是"切到番茄钟节奏"。
+            // ProjectEye 的 TrayService.NotifyIcon_MouseDoubleClick 也是这个语义：
+            //   config.options.General.IsTomatoMode = !IsTomatoMode; config.OnChanged();
+            // 切完必须给一个**看得见**的反馈 —— 见 SetPomodoroMode 里的提示卡。
+            tray.DoubleClick += delegate
+            {
+                try { TogglePomodoroMode(); } catch { }
+            };
 
             if (cfg.StartWithWindows) EnsureAutoStartRegistered(true);
 
@@ -6763,6 +6955,12 @@ namespace EyeLite
             if (OpenSettingsOnStart)
             {
                 try { Ui.Post(delegate { ShowSettings(); }); } catch { }
+            }
+
+            if (TogglePomodoroOnStart)
+            {
+                // 延后一点：让托盘图标先注册完，否则提示卡可能比图标先出现。
+                Ui.Post(delegate { try { SetPomodoroMode(true); } catch { } });
             }
 
             // 测试设施：EYE_LITE_FAKE_ROUTINE=颈|肩|腰|腕 时，启动即播该例程。
@@ -8160,6 +8358,11 @@ namespace EyeLite
             catch { savedForeground = IntPtr.Zero; }
 
             isResting = true;
+
+            // 模式提示卡是 TopMost 的，遮罩也是 —— 不主动收掉它会压在遮罩上面，
+            // 变成"全屏休息里飘着一张番茄钟卡片"。休息一开始就收。
+            try { if (modeToast != null) modeToast.CloseToast(); } catch { }
+
             // 手动"立即休息"是用户主动行为，必须覆盖任何抑制状态。
             // 抑制状态在这里清掉，休息期间不再评估 gate（契约 §9）。
             isSuppressed = false;
@@ -8473,6 +8676,65 @@ namespace EyeLite
             }
             catch { }
             savedForeground = IntPtr.Zero;
+        }
+
+        // ---------- 番茄钟模式切换（托盘双击 / 菜单共用的唯一入口）----------
+        //
+        // 为什么双击要改语义：以前双击 = 立即休息。用户反馈得很直接 ——
+        // 「我都双击了那我直接站起来自己休息不就行了，还用什么提醒」。
+        // 想休息的人不需要程序帮忙；双击这个手势，用户真正想要的是"换一套节奏"。
+        // ProjectEye 的做法也是这个（NotifyIcon_MouseDoubleClick 翻转 IsTomatoMode）。
+        private void TogglePomodoroMode()
+        {
+            SetPomodoroMode(!cfg.PomodoroEnabled);
+        }
+
+        private void SetPomodoroMode(bool on)
+        {
+            if (miPomodoro != null) miPomodoro.Checked = on;   // 两条入口的状态永远一致
+            if (cfg.PomodoroEnabled == on) return;
+
+            cfg.PomodoroEnabled = on;
+            cfg.Save();
+            screenSignature = "";          // 参数变了，下次休息重建窗体（换配色）
+            if (!isResting) ResetWork();   // 换节奏 = 本轮重新算，避免"切完马上就弹"
+            UpdateTrayText();
+            ShowModeToast(on);
+        }
+
+        /// <summary>
+        /// 切完模式弹一张卡。**必须给反馈**：不弹的话屏幕上只有图标配色变了一点，
+        /// 用户会以为双击没生效，然后去菜单里翻（这正是这次反馈的来源）。
+        /// </summary>
+        private void ShowModeToast(bool entering)
+        {
+            try
+            {
+                if (modeToast == null || modeToast.IsDisposed)
+                {
+                    modeToast = new ModeToastForm();
+                    modeToast.RequestAccept += delegate
+                    {
+                        // 点「开始专注」= 从此刻重新起算一个完整专注周期（对齐 ProjectEye
+                        // 的"点开始才真正开始"）；退出模式那张卡点「知道了」什么都不做。
+                        if (cfg.PomodoroEnabled && !isResting) ResetWork();
+                    };
+                }
+
+                string title = entering ? "已切换到番茄钟" : "已退出番茄钟";
+                string body = entering
+                    ? "专注 " + cfg.PomodoroWork + " 分钟 · 休息 " + cfg.PomodoroRest + " 分钟（再双击图标可退出）"
+                    : "回到护眼节奏：工作 " + cfg.WorkMinutes + " 分钟 · 休息 " + cfg.RestSeconds + " 秒";
+                string btn = entering ? "开始专注" : "知道了";
+
+                Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+                int m = modeToast.MarginPx;
+                modeToast.ShowToast(title, body, btn,
+                                    wa.Right - modeToast.Width - m,
+                                    wa.Bottom - modeToast.Height - m,
+                                    30000);
+            }
+            catch { }
         }
 
         private void IfWorkingStartRest()
