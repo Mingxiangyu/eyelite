@@ -49,6 +49,15 @@ WinForms 的 NumericUpDown（UpDownBase）内部有一个原生 `EDIT` 子窗口
 > 所以本仪器取**容器左缘 + 4px**（留白区内），并把"按字面取 -40px 会落在谁身上"
 > 作为诊断信息打印出来（WindowFromPoint），让这个偏差可审计、不靠嘴说。
 
+> **铁律（2026-11-17 真机踩坑换来的）**：任何"按键 / 点击生效了"的判据，
+> 都必须**同时断言"生效在目标控件上"**，两个条件缺一不可。
+> 原因：设置页打开时第一个 NumericUpDown **自带初始焦点**，第一版判据只看"值 +1"，
+> 于是在缺陷态也判了 PASS —— 我点的那一下毫无作用，↑ 却打在了那个本来就有焦点的框上。
+> 这和本项目此前三次仪器事故是同一族：**信号源不是你以为的那个**
+> （抓图抓到静态背景 / 探针比产品快 / 窗口可见但被父容器裁掉 / 按键打到别的控件上）。
+> 所以 C 的判据是"值 +1 **且** 焦点确实进了本行 EDIT"，且每行开测前先把焦点钉到一个
+> Panel 上（`clear_focus`），让"值变了"只可能由这一次点击造成。
+
 ### D 聚焦态可见：PrintWindow 前后比对容器描边
 输入框自己 `BorderStyle.None`，焦点反馈只能靠容器描边换色（v1.6.1 新增
 `RoundPanel.SetBorderColor`）。所以抓容器矩形那一块像素，比较聚焦前后差异。
@@ -57,13 +66,29 @@ WinForms 的 NumericUpDown（UpDownBase）内部有一个原生 `EDIT` 子窗口
 - 抓图走 CreateDIBSection，连 `GetDC(0)` 都不碰，物理上不可能读到别的窗口。
 - 比较前先连抓两帧确认基线稳定：不稳就 SKIP，不硬给结论。
 
-### E 「预览渐暗」按钮 禁用/可用 的像素方向
+### V 「预览渐暗」按钮 禁用/可用 的像素方向
 自绘按钮（RoundButton）没有系统主题兜底，Enabled 改了不等于画对了：
 v1.6.1 之前用 `ControlPaint.Dark(fore, 0.45f)`，在"浅底深字"上把禁用态压得**更黑**，
 方向整个反了（lead 像素取样：禁用 (28,32,38) < 可用 (74,85,104)）。
 所以这条只认像素：同一张图里取该按钮文字带的最深亮度，断言 **禁用更淡**（差 > +20）。
 顺带验行为：把强度值连按 ↓ 改到 0 → 按钮**立刻**变灰（ValueChanged 直连，不用保存）。
 这条判法很通用，以后所有自绘按钮都能复用。
+（编号从 E 改成 V，把 E1~E5 让给下方"底部版式"那一组，避免同名不同义。）
+
+### E1~E5 底部版式：保存按钮是否真的可见且可点
+这一组治的是**另一个物种**的缺陷：控件存在、可见、`GetWindowRect` 也在屏幕内，
+但被父客户区裁掉 —— 和输入框那次是同一类骗局。所以三条独立证据缺一不可：
+- **E1 滚动条**：`WS_VSCROLL` 样式位是权威（WinForms 的 AutoScroll 滚动条是**画在
+  客户区里**的，不是子窗口，所以"枚举不到 ScrollBar"不能单独证明没有），
+  另报 `窗口宽 − 客户区宽`（≈25.5 = 17×1.5 时就是滚动条宽度）与 ScrollBar 子窗口数。
+- **E2 几何**：保存按钮底边 ≤ 客户区底边。这是必要条件，**不是**充分条件。
+- **E3 位图**：从 PrintWindow 位图里，逐行数按钮下方还有多少行**纯页面底色**。
+  rect 在屏幕内 ≠ 画得出来，所以留白必须从像素数（阈值 ≥10 行）。
+- **E4 命中**：按钮中心 `WindowFromPoint` 必须是按钮自己 —— "看得见但点不到"就是被裁。
+- **E5 真点「取消」**：真鼠标点击（不是 PostMessage）→ 4s 内关窗 + `config.ini` 字节不变。
+  不用「保存」：那会 `cfg.Save()` + `EnsureAutoStartRegistered(false)`，
+  而当前测试配置没有 `StartWithWindows` 键 → 会把用户的自启注册表值（HKCU 的 Run 项下的 EyeLite）**删掉**。
+  「取消」同样要真的命中按钮并走完关窗流程，证明力一样，且不写盘、不动注册表。
 
 ## 纪律
 - 只 kill **自己启动的 PID**（`taskkill /PID`），绝不用 `/IM` —— 用户可能正在用。
@@ -1221,13 +1246,14 @@ def main():
                         '%s: 点框心(%d,%d) 后 %s —— %s（该点上实际是 %s）'
                         % (r['label'], cxp, cyp, d2, '；'.join(why2), owner2_cls))
 
-        # ================= 判据 E：「预览渐暗」按钮 禁用/可用 的视觉方向 =================
+        # ================= 判据 V：「预览渐暗」按钮 禁用/可用 的视觉方向 =================
+        # （编号从 E 改成 V，把 E1~E5 让给下方"底部版式"那一组，避免同名不同义。）
         # 这条只看像素，不看属性 —— 因为自绘按钮没有系统主题兜底，Enabled 改了但画出来
         # 可能"禁用比可用更醒目"（v1.6.1 之前就是这样：ControlPaint.Dark 把字压得更黑，
         # 在浅底深字上方向反了；lead 取样为 禁用(28,32,38) < 可用(74,85,104)）。
         # 同时顺带验一条行为：把强度值改到 0 → 按钮**立刻**变灰（ValueChanged 直连，
         # 不用点保存），这也是 v1.6.1 新增的联动。
-        print('\n  -- 判据 E：「预览渐暗」按钮 禁用/可用 的像素方向 --')
+        print('\n  -- 判据 V：「预览渐暗」按钮 禁用/可用 的像素方向 --')
         btn = None
         for k in kids:
             if short_class(class_name(k)) == 'BUTTON' and '预览渐暗' in (window_text(k) or ''):
@@ -1239,7 +1265,7 @@ def main():
                 dim_row = r
                 break
         if btn is None or dim_row is None:
-            REP.add('SKIP', 'E', '没找到「预览渐暗」按钮或渐暗强度行（文案变了？）')
+            REP.add('SKIP', 'V', '没找到「预览渐暗」按钮或渐暗强度行（文案变了？）')
         else:
             dim_edit = dim_row['hwnd']
             dim_box = ancestors(dim_edit)[1]
@@ -1278,24 +1304,24 @@ def main():
             brt_dis, _r2 = btn_brightness()
 
             if brt_en is None or brt_dis is None:
-                REP.add('SKIP', 'E', '抓图失败，无法量按钮文字色')
+                REP.add('SKIP', 'V', '抓图失败，无法量按钮文字色')
             else:
                 e1 = (en0 and not en1)
                 e2 = (brt_dis is not None and brt_en is not None and brt_dis > brt_en + 20)
                 if e1:
-                    REP.add('PASS', 'E1',
+                    REP.add('PASS', 'V1',
                             '按钮可用性随强度联动：强度>0 时 Enabled=%s，降到 0 后 Enabled=%s'
                             '（按 ↓ %d 次，实测值=%s）' % (en0, en1, n_down, v_zero))
                 else:
-                    REP.add('FAIL', 'E1',
+                    REP.add('FAIL', 'V1',
                             '按钮可用性没跟着强度走：强度>0 Enabled=%s，降到 0 后 Enabled=%s'
                             % (en0, en1))
                 if e2:
-                    REP.add('PASS', 'E2',
+                    REP.add('PASS', 'V2',
                             '禁用态文字更"淡"（方向正确）：可用亮度 %d → 禁用亮度 %d'
                             '（差 +%d）' % (brt_en, brt_dis, brt_dis - brt_en))
                 else:
-                    REP.add('FAIL', 'E2',
+                    REP.add('FAIL', 'V2',
                             '禁用态文字比可用态更"浓"或几乎无差：可用亮度 %d → 禁用亮度 %d'
                             '（差 %d，要求 > +20）' % (brt_en, brt_dis, brt_dis - brt_en))
 
@@ -1309,6 +1335,124 @@ def main():
                     n_up += 1
                     time.sleep(0.015)
                 print('      强度已还原: %s → %s' % (v_zero, edit_text(dim_edit)))
+
+        # ================= 判据 E1~E4：底部版式（保存按钮是否真的可见可点）=================
+        # 这一组解决的是另一个物种的缺陷：**控件存在、可见、rect 也在屏幕内，但被父客户区裁掉**
+        # —— 和输入框那次是同一类骗局，所以判据不能只信 GetWindowRect：
+        #   · E2 只做"几何自洽"（底边 ≤ 客户区底边），是必要条件不是充分条件；
+        #   · E3 必须**从 PrintWindow 位图里数像素**（按钮下方还有多少行背景），
+        #     因为 rect 在屏幕内 ≠ 画得出来；
+        #   · E4 再用 WindowFromPoint 交叉验证"点到的是不是它"。
+        # 三条同时成立才算这部分没问题。
+        print('\n  -- 判据 E1~E4：底部版式（滚动条 / 保存按钮底边 / 下方留白 / 可点）--')
+
+        def find_btn(needle):
+            for k in kids:
+                if short_class(class_name(k)) != 'BUTTON':
+                    continue
+                if needle in (window_text(k) or ''):
+                    return k
+            return None
+
+        btn_save = find_btn('保存')
+        btn_cancel = find_btn('取消')
+        sb_children = [k for k in kids if 'SCROLL' in class_name(k).upper()]
+
+        # ---- E1 有没有垂直滚动条 ----
+        # 三条独立证据：WS_VSCROLL 样式位、滚动条子窗口、窗口宽 − 客户区宽 的差值。
+        # WinForms 的 AutoScroll 滚动条是**自己画在客户区里**的（不是子窗口），
+        # 所以"找不到 ScrollBar 子窗口"不能单独当"没有滚动条"的证据，样式位才是权威。
+        w_win, h_win = fr - fl, fb - ft
+        dw = w_win - cw
+        if not has_vs and not sb_children:
+            REP.add('PASS', 'E1',
+                    '无垂直滚动条：WS_VSCROLL=0，滚动条子窗口 %d 个，'
+                    '窗口宽 %d − 客户区宽 %d = %d（纯边框）'
+                    % (len(sb_children), w_win, cw, dw))
+        else:
+            REP.add('FAIL', 'E1',
+                    '有垂直滚动条：WS_VSCROLL=%d，滚动条子窗口 %d 个，'
+                    '窗口宽 %d − 客户区宽 %d = %d（≈17×1.5=25.5 就是滚动条宽度）'
+                    % (1 if has_vs else 0, len(sb_children), w_win, cw, dw))
+
+        if btn_save is None:
+            REP.add('FAIL', 'E2', '找不到「保存」按钮（文案变了？）')
+            REP.add('SKIP', 'E3', '没有保存按钮，量不到留白')
+            REP.add('SKIP', 'E4', '没有保存按钮，无法验证可点')
+            save_rect = None
+        else:
+            save_rect = rect_in_client(btn_save, form)     # 客户区坐标
+            sx0, sy0, sx1, sy1 = save_rect
+            # ---- E2 底边几何 ----
+            if sy1 <= ch:
+                REP.add('PASS', 'E2',
+                        '「保存」客户区矩形 [%d,%d]..[%d,%d]，底边 %d ≤ 客户区高 %d'
+                        '（余 %d px）' % (sx0, sy0, sx1, sy1, sy1, ch, ch - sy1))
+            else:
+                REP.add('FAIL', 'E2',
+                        '「保存」底边 %d > 客户区高 %d（超出 %d px）→ 底部被裁'
+                        % (sy1, ch, sy1 - ch))
+
+            # ---- E3 按钮下方留白：从位图数像素 ----
+            # 做法：从按钮底边往下，逐行检查按钮横向范围内是否**整行都是页面底色**（PageBg
+            # #F5F7FA）。连续背景行数 = 视觉留白。被裁掉时这里会立刻遇到非背景（或直接出界）。
+            PAGE_BG = (0xF5, 0xF7, 0xFA)
+            ox3, oy3 = client_origin_in_window(form)
+            ok3, w3, h3, buf3 = capture_window(form)
+            if not ok3 or not buf3:
+                REP.add('SKIP', 'E3', 'PrintWindow 抓图失败，无法从位图数留白像素')
+            else:
+                cb_img = oy3 + ch                       # 客户区底边在图像里的行
+                start = oy3 + sy1 + 2                   # 按钮底边下 2 行，避开描边/抗锯齿
+                gap_rows = 0
+                if start >= cb_img:
+                    REP.add('FAIL', 'E3',
+                            '按钮底边已经在客户区底边（或之外），下方留白 0 px'
+                            '（几何: 客户区底 %d，按钮底 %d）' % (cb_img, start))
+                else:
+                    for y in range(start, cb_img):
+                        row_bg = True
+                        for x in range(ox3 + sx0, ox3 + sx1, 3):
+                            if x >= w3:
+                                break
+                            i = (y * w3 + x) * 4
+                            if (abs(buf3[i + 2] - PAGE_BG[0]) > 8
+                                    or abs(buf3[i + 1] - PAGE_BG[1]) > 8
+                                    or abs(buf3[i] - PAGE_BG[2]) > 8):
+                                row_bg = False
+                                break
+                        if row_bg:
+                            gap_rows += 1
+                        else:
+                            break
+                    geo_gap = ch - sy1
+                    # 阈值 10px：150% 下设计留白 14×1.5=21px，取一半做下限，避免
+                    # "刚好贴着"被判通过（1px 那种必须 FAIL）。
+                    if gap_rows >= 10:
+                        REP.add('PASS', 'E3',
+                                '「保存」下方留白：位图实测 %d 行纯背景'
+                                '（几何 %d px，客户区底 %d − 按钮底 %d）'
+                                % (gap_rows, geo_gap, ch, sy1))
+                    else:
+                        REP.add('FAIL', 'E3',
+                                '「保存」下方留白只有 %d 行纯背景（要求 ≥10；几何 %d px）'
+                                '→ 页面贴死底边' % (gap_rows, ch - sy1))
+
+            # ---- E4 按钮中心点命中它自己 ----
+            cxs = fl + (ox3 + (sx0 + sx1) // 2)
+            cys = ft + (oy3 + (sy0 + sy1) // 2)
+            owner4, owner4_cls = point_owner_class(cxs, cys)
+            if owner4 == btn_save or hwnd_in_subtree(owner4, btn_save):
+                REP.add('PASS', 'E4',
+                        '「保存」中心(%d,%d) 命中按钮自己（%s）' % (cxs, cys, owner4_cls))
+            elif hwnd_in_subtree(owner4, form):
+                REP.add('FAIL', 'E4',
+                        '「保存」中心(%d,%d) 命中的是 %s，**不是按钮** → 看得见但点不到（被裁）'
+                        % (cxs, cys, owner4_cls))
+            else:
+                REP.add('SKIP', 'E4',
+                        '「保存」中心(%d,%d) 被窗口外的 %s 占住，无法验证'
+                        % (cxs, cys, owner4_cls))
 
         # ---------- 存全景图 ----------
         # 取最后一次成功的整窗抓图；一次都不成功就不写文件（不拿截图凑数）。
@@ -1342,6 +1486,48 @@ def main():
                          os.path.getsize(crop_path) / 1024.0))
             except Exception as e:
                 print('  裁切图写入失败: %s' % e)
+
+        # ================= 判据 E5：真点「取消」能关窗（最硬的一条）=================
+        # 为什么用「取消」而不是「保存」：
+        #   1. 点「保存」会 cfg.Save() 写盘 + EnsureAutoStartRegistered(...)
+        #      —— 当前配置里没有 StartWithWindows 键（回落 false），会把
+        #      HKCU\...\Run\EyeLite **删掉**（SE 核过源码路径）。不能碰。
+        #   2. 「取消」一样要真的命中按钮、真的走一遍 click → DialogResult.Cancel → 关窗，
+        #      同样能证明"按钮可点"，且不写盘、不动注册表。
+        # 判据 = 窗口在 N 秒内不可见 + config.ini 字节没变（双重证据）。
+        if btn_cancel is None:
+            REP.add('SKIP', 'E5', '找不到「取消」按钮，无法验证可点')
+        else:
+            cl2, ct2, cr2, cb2 = window_rect(btn_cancel)
+            ccx, ccy = (cl2 + cr2) // 2, (ct2 + cb2) // 2
+            owner5, owner5_cls = point_owner_class(ccx, ccy)
+            cfg_before = read_cfg_raw()
+            if not (owner5 == btn_cancel or hwnd_in_subtree(owner5, btn_cancel)):
+                REP.add('SKIP', 'E5',
+                        '「取消」中心(%d,%d) 命中的是 %s（不是按钮），拒绝盲点'
+                        % (ccx, ccy, owner5_cls))
+            else:
+                click_at(ccx, ccy)
+                t0 = time.time()
+                closed = False
+                while time.time() - t0 < 4.0:
+                    if not user32.IsWindow(form) or not user32.IsWindowVisible(form):
+                        closed = True
+                        break
+                    time.sleep(0.15)
+                cfg_after = read_cfg_raw()
+                same_cfg = (cfg_after == cfg_before)
+                if closed and same_cfg:
+                    REP.add('PASS', 'E5',
+                            '真点「取消」后 %.1fs 内关窗，且 config.ini 未被写'
+                            '（%d 字节，点前点后一致）' % (time.time() - t0, len(cfg_after)))
+                elif closed:
+                    REP.add('PASS', 'E5',
+                            '真点「取消」后 %.1fs 内关窗（注意：config.ini 字节有变化，'
+                            '需要人工确认）' % (time.time() - t0))
+                else:
+                    REP.add('FAIL', 'E5',
+                            '点「取消」后 4s 内窗口仍未关闭 → 按钮看得见但点不动')
 
         return REP.summary()
     finally:
