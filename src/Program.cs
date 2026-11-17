@@ -5409,16 +5409,33 @@ namespace EyeLite
         private bool suppressPluginToggle;      // 回滚时改 Checked 会再次触发事件，用它挡掉递归
 
         // 版式常量（以下全部是 96dpi 下的设计值，运行时一律经 Sc() 乘 DPI 因子）
-        // 设计基准客户区 520 x 1356：
-        //   88(页头) + 232(节奏，4 行 + 预览按钮 + 渐暗代价小字) + 16 + 144(番茄钟) + 16
-        //   + 144(久坐与活动) + 16 + 336(行为，9 行) + 16 + 268(扩展，6 个插件)
-        //   + 24 + 38(按钮) + 18(底部留白) = 1356
+        // 设计基准客户区 520 x 1332：
+        //   88(页头) + 232(节奏，4 行 + 预览按钮 + 渐暗代价小字) + 12 + 144(番茄钟) + 12
+        //   + 144(久坐与活动) + 12 + 336(行为，9 行) + 12 + 268(扩展，6 个插件)
+        //   + 20 + 38(按钮) + 14(底部留白) = 1332
         //
         // 这个数字只是"内容的自然高度"，不是硬指标：窗口放不下时由 AutoScroll 兜住，
         // 所以再加行只要同步改这里 + 末尾的 AutoScrollMinSize，不会出现"按钮被切掉"。
         // （「扩展」卡恒定显示 —— 它是插件的唯一开关入口，藏起来就等于没有开关。）
+        //
+        // ---- 为什么间距 12、按钮前 20、底部 14（别随手改回 16/24/18）----
+        // 定位：这是**"让 4K@150% 这块屏不用滚"**，不是"修好了滚动"。
+        // 缺口随屏幕变化，AutoScroll 才是兜底；这里的余量只保证"4K@150% 打开即见保存按钮"：
+        //   1080p@150% 缺 1078px｜1440p@150% 缺 718px｜4K@150% 缺 30px｜4K@200% 缺 736px
+        // 压掉 36px（Gap 16→12、按钮前 24→20、底部 18→14）后，4K@150% 物理高 1998 ≤ 可装 2004。
+        // 注意 Gap 有 5 处用到：4 处是主卡片间距，第 5 处是「统计」卡（仅 Plugin_Stats 开启时出现，
+        // 那时内容高 1544 必然要滚动，本来就不指望放下，AutoScroll 兜住）。
+        // 1080p@150% / 1440p 缺口 700~1000px，压缩永远解决不了，"要滚"在那类屏上是既有设计、
+        // 不算缺陷 —— 别为此把行高也压小（RowHeight 32→30 会推翻整套已验收的几何）。
+        // 也别让三个月后的人以为这 36px 是通用解：它只服务用户当前这块屏。
+        //
+        // ---- 留档：真正该做的结构性方案（本轮没做）----
+        // 把「保存 / 取消 / 关于」放进 Dock=Bottom 的底栏，卡片区单独 Dock=Fill + AutoScroll。
+        // 那样所有屏幕都永远看得到保存，也不必再为"加一行"重算余量。
+        // 本轮没做：它要改 AutoScrollMinSize 语义（btnY+38+18 → cursorTop+24），
+        // 而设置页几何刚验收通过（tools/settings-ui-check.py 32/32），不值得在封板日重构。
         private const int FormW = 520;
-        private const int FormH = 1356;
+        private const int FormH = 1332;
         private const int CardLeft = 24;
         private const int CardWidth = 472;      // 520 - 24 * 2
         private const int CardPad = 22;         // 卡片左右内边距
@@ -5428,7 +5445,7 @@ namespace EyeLite
         private const int CheckHeight = 26;
         private const int NumWidth = 96;
         private const int NumHeight = 24;
-        private const int Gap = 16;
+        private const int Gap = 12;
 
         // DPI 缩放因子（1.0 = 96dpi）。字体是 pt 会随 DPI 放大，盒子必须同比放大，
         // 否则"字体高度 : 盒子高度"随 DPI 变化，文字就被裁。
@@ -5677,8 +5694,9 @@ namespace EyeLite
                 cursorTop = statTop + statH;
             }
 
-            // ---------- 底部按钮：最后一排卡片底部 + Sc(24) ----------
-            int btnY = cursorTop + Sc(24);
+            // ---------- 底部按钮：最后一排卡片底部 + Sc(20) ----------
+            // 原来是 Sc(24)；压到 20 是为 4K@150% 不出现滚动条，理由见 FormH 上方的注释。
+            int btnY = cursorTop + Sc(20);
 
             RoundButton ok = new RoundButton("保存", Sc(8), Ui.PrimaryBg, Ui.PrimaryHover,
                                              Color.White, Color.Empty, 0);
@@ -5716,7 +5734,7 @@ namespace EyeLite
 
             // 真正的滚动范围在这里才定得下来：内容总高 = 保存按钮底边 + 底部留白。
             // 宽度传 0 = 水平范围跟随客户区（见构造函数开头 AutoScroll 处的原因）。
-            this.AutoScrollMinSize = new Size(0, btnY + Sc(38) + Sc(18));
+            this.AutoScrollMinSize = new Size(0, btnY + Sc(38) + Sc(14));
         }
 
         // ================================================================
