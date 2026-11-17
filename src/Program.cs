@@ -3238,9 +3238,51 @@ namespace EyeLite
         }
         private float dpiScale = 1f;
 
+        // 与休息遮罩同一套规则：布局按**屏幕占比**，不按 DPI。
+        // 设计基准 1920×1080；本窗口设计尺寸 720×800 = 屏宽 37.5%、屏高 74%。
+        // 4K@150% 下 k=1.33 → 窗口 960×1066，占屏比例与 1080p 时一致。
+        private const int DesignW = 1920;
+        private const int DesignH = 1080;
+        private float k = 1f;
+        private Dictionary<int, Font> fontCache;
+
+        private Font F(float basePt)
+        {
+            if (fontCache == null) fontCache = new Dictionary<int, Font>();
+            int key = (int)(basePt * 10);
+            Font f;
+            if (fontCache.TryGetValue(key, out f)) return f;
+            float pt = basePt * k / (dpiScale <= 0f ? 1f : dpiScale);
+            if (pt < 4f) pt = 4f;
+            if (pt > 96f) pt = 96f;
+            try { f = new Font("微软雅黑", pt, FontStyle.Regular); }
+            catch { f = SystemFonts.DefaultFont; }
+            fontCache[key] = f;
+            return f;
+        }
+
+        private static float CalcK()
+        {
+            try
+            {
+                Rectangle b = Screen.PrimaryScreen.Bounds;
+                float dpi = Ui.Scale <= 0f ? 1f : Ui.Scale;
+                float w = b.Width / dpi;
+                float h = b.Height / dpi;
+                float kx = w / (float)DesignW;
+                float ky = h / (float)DesignH;
+                float v = kx < ky ? kx : ky;
+                if (v < 0.5f) v = 0.5f;
+                if (v > 4f) v = 4f;
+                return v;
+            }
+            catch { return 1f; }
+        }
+
         public MoveForm(List<MoveItem> actions, int restSeconds)
         {
             dpiScale = Ui.Scale;
+            k = CalcK();
 
             this.items = actions;
             int budget = restSeconds;
@@ -3254,7 +3296,7 @@ namespace EyeLite
             this.BackColor = Ui.GradTop;
             this.AutoScaleMode = AutoScaleMode.None;
             this.DoubleBuffered = true;
-            this.Font = Ui.FontUi;
+            this.Font = F(10f);
 
             // 高度从 640 加到 800：人物放大一倍后（用户明确要求"再大一倍"），
             // 640 里"标题+要点"与"提示+倒计时+进度条"之间只剩 448px，
@@ -3283,7 +3325,7 @@ namespace EyeLite
 
         private int Sc(int px)
         {
-            return (int)(px * dpiScale + 0.5f);
+            return (int)(px * k + 0.5f);
         }
 
         // ---- 演示区的纵向布局：**只在这里定义一次** ----
@@ -3367,7 +3409,7 @@ namespace EyeLite
                     }
                 }
 
-                TextRenderer.DrawText(g, "结束", Ui.FontEyebrow, closeRect, Ui.EyebrowText,
+                TextRenderer.DrawText(g, "结束", F(9f), closeRect, Ui.EyebrowText,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
                     TextFormatFlags.NoPrefix);
             }
@@ -3504,11 +3546,11 @@ namespace EyeLite
             MoveItem item = items[index];
 
             // ---- 标题 + 要点 ----
-            TextRenderer.DrawText(g, item.Name, Ui.FontRestEyebrow,
+            TextRenderer.DrawText(g, item.Name, F(12f),
                 new Rectangle(0, Sc(14), w, Sc(28)), Ui.TimeText,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
 
-            TextRenderer.DrawText(g, item.Tips, Ui.FontEyebrow,
+            TextRenderer.DrawText(g, item.Tips, F(9f),
                 new Rectangle(Sc(20), Sc(44), w - Sc(40), Sc(20)), Ui.EyebrowText,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
 
@@ -3533,7 +3575,7 @@ namespace EyeLite
             int leftAllSec = (budgetMs - elapsedMs + 999) / 1000;
             if (leftAllSec < 0) leftAllSec = 0;
 
-            TextRenderer.DrawText(g, "还剩 " + leftAllSec + " 秒", Ui.FontEyebrow,
+            TextRenderer.DrawText(g, "还剩 " + leftAllSec + " 秒", F(9f),
                 new Rectangle(0, h - Sc(46), w, Sc(18)), Ui.RingLabel,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
 
@@ -3563,7 +3605,7 @@ namespace EyeLite
             // 人物的小腿上（截图实测：素材图和火柴人都会被压住）。
             // 现在放到地面与「还剩 N 秒」之间那条空带里。
             // 位置由"地面线"反算（h - 底边预留 + 8）：放大后地面线下移，这行自动跟着下移。
-            TextRenderer.DrawText(g, "如有不适请立即停止", Ui.FontEyebrow,
+            TextRenderer.DrawText(g, "如有不适请立即停止", F(9f),
                 new Rectangle(0, h - Sc(72), w, Sc(18)), Ui.DarkTipText,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
         }
@@ -6114,6 +6156,7 @@ namespace EyeLite
         // 否则"字体高度 : 盒子高度"随 DPI 变化，文字就被裁。
         private float dpiScale = 1f;
 
+        // 与 RestForm 同义：px 是设计基准下的像素，k 是屏幕占比系数
         private int Sc(int px)
         {
             return (int)(px * dpiScale + 0.5f);   // 不用 Math.Round：避免银行家舍入的 ±1px 抖动
