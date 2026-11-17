@@ -5414,7 +5414,7 @@ namespace EyeLite
 
         private int Sc(int px)
         {
-            return (int)(px * dpiScale + 0.5f);
+            return (int)(px * k + 0.5f);
         }
 
         /// <summary>
@@ -5481,12 +5481,52 @@ namespace EyeLite
         }
 
 
+        // ---- 与遮罩/跟练同一套：布局按屏幕占比，不按 DPI ----
+        private const int DesignW = 1920;
+        private const int DesignH = 1080;
+        private float k = 1f;
+        private Dictionary<int, Font> fontCache;
+
+        private static float CalcK()
+        {
+            try
+            {
+                Rectangle b = Screen.PrimaryScreen.Bounds;
+                float dpi = Ui.Scale <= 0f ? 1f : Ui.Scale;
+                float kx = (b.Width / dpi) / (float)DesignW;
+                float ky = (b.Height / dpi) / (float)DesignH;
+                float v = kx < ky ? kx : ky;
+                if (v < 0.5f) v = 0.5f;
+                if (v > 4f) v = 4f;
+                return v;
+            }
+            catch { return 1f; }
+        }
+
+        private Font F(float basePt)
+        {
+            if (fontCache == null) fontCache = new Dictionary<int, Font>();
+            int key = (int)(basePt * 10);
+            Font f;
+            if (fontCache.TryGetValue(key, out f)) return f;
+            float dpi = Ui.Scale <= 0f ? 1f : Ui.Scale;
+            float pt = basePt * k / dpi;
+            if (pt < 4f) pt = 4f;
+            if (pt > 96f) pt = 96f;
+            try { f = new Font("微软雅黑", pt, FontStyle.Regular); }
+            catch { f = SystemFonts.DefaultFont; }
+            fontCache[key] = f;
+            return f;
+        }
+
         public event EventHandler RequestPostpone;
         public event EventHandler RequestSkip;
         public event EventHandler RequestNow;
 
         public PreviewForm()
         {
+            k = CalcK();
+
             dpiScale = Ui.Scale;
 
             this.FormBorderStyle = FormBorderStyle.None;
@@ -5496,7 +5536,7 @@ namespace EyeLite
             this.BackColor = Ui.GradTop;
             this.AutoScaleMode = AutoScaleMode.None;
             this.DoubleBuffered = true;
-            this.Font = Ui.FontUi;
+            this.Font = F(10f);
 
             int w = Sc(400);
             int h = Sc(136);
@@ -5505,7 +5545,7 @@ namespace EyeLite
             lblEyebrow = new Label();
             lblEyebrow.Text = "休息提醒";
             lblEyebrow.ForeColor = Ui.EyebrowText;
-            lblEyebrow.Font = Ui.FontRestEyebrow;
+            lblEyebrow.Font = F(12f);
             lblEyebrow.TextAlign = ContentAlignment.MiddleLeft;
             lblEyebrow.AutoSize = false;
             lblEyebrow.BackColor = Color.Transparent;
@@ -5527,7 +5567,7 @@ namespace EyeLite
             lblCountUnit = new Label();
             lblCountUnit.Text = "秒";
             lblCountUnit.ForeColor = Ui.RingLabel;
-            lblCountUnit.Font = Ui.FontTip;
+            lblCountUnit.Font = F(11f);
             lblCountUnit.TextAlign = ContentAlignment.MiddleLeft;
             lblCountUnit.AutoSize = false;
             lblCountUnit.BackColor = Color.Transparent;
@@ -5554,11 +5594,11 @@ namespace EyeLite
             // ---- 说明文案 ----
             lblBody = new Label();
             lblBody.ForeColor = Ui.HintText;
-            lblBody.Font = Ui.FontHint;
+            lblBody.Font = F(20f);
             lblBody.TextAlign = ContentAlignment.MiddleLeft;
             lblBody.AutoSize = false;
             lblBody.BackColor = Color.Transparent;
-            // 高度必须容得下 20pt 的行高：Ui.FontHint = 微软雅黑 20pt，96dpi 下行高约 32px，
+            // 高度必须容得下 20pt 的行高：F(20f) = 微软雅黑 20pt，96dpi 下行高约 32px，
             // 而这里原来只给了 Sc(30) —— 下边缘必然被裁（用户反馈"左侧文字没显示全"）。
             // 现在给 Sc(36)：y 同时从 44 上移到 42（42+36=78，按钮从 92 才开始，不会撞上）；
             // 留出的 4px 是给 DPI 缩放后行高比略变大时的余量。别再改回 30。
@@ -5573,7 +5613,7 @@ namespace EyeLite
             btnPostpone = new RoundButton("延后", Sc(15),
                                           Ui.DarkBtnBg, Ui.DarkBtnHover,
                                           Ui.DarkBtnText, Ui.DarkBtnBorder, bw);
-            btnPostpone.Font = Ui.FontRowLabel;
+            btnPostpone.Font = F(10.5f);
             btnPostpone.SetBounds(Sc(20), by, Sc(104), bh);
             btnPostpone.Click += delegate
             {
@@ -5584,7 +5624,7 @@ namespace EyeLite
             btnSkip = new RoundButton("跳过", Sc(15),
                                       Ui.DarkBtnBg, Ui.DarkBtnHover,
                                       Ui.DarkBtnText, Ui.DarkBtnBorder, bw);
-            btnSkip.Font = Ui.FontRowLabel;
+            btnSkip.Font = F(10.5f);
             btnSkip.SetBounds(Sc(134), by, Sc(84), bh);
             btnSkip.Click += delegate
             {
@@ -5596,7 +5636,7 @@ namespace EyeLite
             btnNow = new RoundButton("立即休息", Sc(15),
                                      Ui.DarkBtnBg, Ui.DarkBtnHover,
                                      Ui.SkipText, Ui.Accent, bw);
-            btnNow.Font = Ui.FontRowLabel;
+            btnNow.Font = F(10.5f);
             btnNow.SetBounds(Sc(228), by, Sc(152), bh);
             btnNow.Click += delegate
             {
@@ -5780,6 +5820,8 @@ namespace EyeLite
 
         public ModeToastForm()
         {
+            k = CalcK();
+
             dpiScale = Ui.Scale;
 
             this.FormBorderStyle = FormBorderStyle.None;
@@ -5789,13 +5831,13 @@ namespace EyeLite
             this.BackColor = Ui.GradTop;
             this.AutoScaleMode = AutoScaleMode.None;
             this.DoubleBuffered = true;
-            this.Font = Ui.FontUi;
+            this.Font = F(10f);
 
             int w = Sc(420);
             int h = Sc(96);          // 只放标题 + 两行正文：3 秒的提示卡不该有按钮
 
             lblTitle = new Label();
-            lblTitle.Font = Ui.FontRestEyebrow;      // 12pt，与遮罩眉标同一档
+            lblTitle.Font = F(12f);      // 12pt，与遮罩眉标同一档
             lblTitle.ForeColor = Ui.TimeText;
             lblTitle.BackColor = Color.Transparent;
             lblTitle.AutoSize = false;
@@ -5804,7 +5846,7 @@ namespace EyeLite
             this.Controls.Add(lblTitle);
 
             lblBody = new Label();
-            lblBody.Font = Ui.FontTip;               // 11pt
+            lblBody.Font = F(11f);               // 11pt
             lblBody.ForeColor = Ui.HintText;
             lblBody.BackColor = Color.Transparent;
             lblBody.AutoSize = false;
@@ -5816,12 +5858,50 @@ namespace EyeLite
             this.Size = new Size(w, h);
         }
 
-        private int Sc(int px)
+        // ---- 与遮罩/跟练同一套：布局按屏幕占比，不按 DPI ----
+        private const int DesignW = 1920;
+        private const int DesignH = 1080;
+        private float k = 1f;
+        private Dictionary<int, Font> fontCache;
+
+        private static float CalcK()
         {
-            return (int)(px * dpiScale + 0.5f);
+            try
+            {
+                Rectangle b = Screen.PrimaryScreen.Bounds;
+                float dpi = Ui.Scale <= 0f ? 1f : Ui.Scale;
+                float kx = (b.Width / dpi) / (float)DesignW;
+                float ky = (b.Height / dpi) / (float)DesignH;
+                float v = kx < ky ? kx : ky;
+                if (v < 0.5f) v = 0.5f;
+                if (v > 4f) v = 4f;
+                return v;
+            }
+            catch { return 1f; }
         }
 
-        /// <summary>距工作区边缘的缩进（已含 DPI 缩放），与预告横幅同一档。</summary>
+        private Font F(float basePt)
+        {
+            if (fontCache == null) fontCache = new Dictionary<int, Font>();
+            int key = (int)(basePt * 10);
+            Font f;
+            if (fontCache.TryGetValue(key, out f)) return f;
+            float dpi = Ui.Scale <= 0f ? 1f : Ui.Scale;
+            float pt = basePt * k / dpi;
+            if (pt < 4f) pt = 4f;
+            if (pt > 96f) pt = 96f;
+            try { f = new Font("微软雅黑", pt, FontStyle.Regular); }
+            catch { f = SystemFonts.DefaultFont; }
+            fontCache[key] = f;
+            return f;
+        }
+
+        private int Sc(int px)
+        {
+            return (int)(px * k + 0.5f);
+        }
+
+        /// <summary>距工作区边缘的缩进（已含屏幕比例），与预告横幅同一档。</summary>
         public int MarginPx
         {
             get { return Sc(24); }
@@ -6157,9 +6237,47 @@ namespace EyeLite
         private float dpiScale = 1f;
 
         // 与 RestForm 同义：px 是设计基准下的像素，k 是屏幕占比系数
+        // ---- 与遮罩/跟练同一套：布局按屏幕占比，不按 DPI ----
+        private const int DesignW = 1920;
+        private const int DesignH = 1080;
+        private float k = 1f;
+        private Dictionary<int, Font> fontCache;
+
+        private static float CalcK()
+        {
+            try
+            {
+                Rectangle b = Screen.PrimaryScreen.Bounds;
+                float dpi = Ui.Scale <= 0f ? 1f : Ui.Scale;
+                float kx = (b.Width / dpi) / (float)DesignW;
+                float ky = (b.Height / dpi) / (float)DesignH;
+                float v = kx < ky ? kx : ky;
+                if (v < 0.5f) v = 0.5f;
+                if (v > 4f) v = 4f;
+                return v;
+            }
+            catch { return 1f; }
+        }
+
+        private Font F(float basePt)
+        {
+            if (fontCache == null) fontCache = new Dictionary<int, Font>();
+            int key = (int)(basePt * 10);
+            Font f;
+            if (fontCache.TryGetValue(key, out f)) return f;
+            float dpi = Ui.Scale <= 0f ? 1f : Ui.Scale;
+            float pt = basePt * k / dpi;
+            if (pt < 4f) pt = 4f;
+            if (pt > 96f) pt = 96f;
+            try { f = new Font("微软雅黑", pt, FontStyle.Regular); }
+            catch { f = SystemFonts.DefaultFont; }
+            fontCache[key] = f;
+            return f;
+        }
+
         private int Sc(int px)
         {
-            return (int)(px * dpiScale + 0.5f);   // 不用 Math.Round：避免银行家舍入的 ±1px 抖动
+            return (int)(px * k + 0.5f);   // 不用 Math.Round：避免银行家舍入的 ±1px 抖动
         }
 
         public SettingsForm(AppConfig cfg)
