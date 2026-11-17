@@ -5248,12 +5248,8 @@ namespace EyeLite
     {
         private Label lblTitle;
         private Label lblBody;
-        private RoundButton btnOk;
         private Timer autoTimer;
         private float dpiScale;
-
-        /// <summary>点了唯一那个按钮（「开始专注」/「知道了」）。</summary>
-        public event EventHandler RequestAccept;
 
         public ModeToastForm()
         {
@@ -5269,7 +5265,7 @@ namespace EyeLite
             this.Font = Ui.FontUi;
 
             int w = Sc(420);
-            int h = Sc(116);
+            int h = Sc(96);          // 只放标题 + 两行正文：3 秒的提示卡不该有按钮
 
             lblTitle = new Label();
             lblTitle.Font = Ui.FontRestEyebrow;      // 12pt，与遮罩眉标同一档
@@ -5286,20 +5282,9 @@ namespace EyeLite
             lblBody.BackColor = Color.Transparent;
             lblBody.AutoSize = false;
             lblBody.TextAlign = ContentAlignment.MiddleLeft;
-            lblBody.SetBounds(Sc(20), Sc(42), w - Sc(40), Sc(26));
+            // 两行：正文可能到 24 个字（"专注 25 分钟 · 休息 5 分钟（再双击图标可退出）"）
+            lblBody.SetBounds(Sc(20), Sc(42), w - Sc(40), Sc(40));
             this.Controls.Add(lblBody);
-
-            btnOk = new RoundButton("知道了", Sc(15),
-                                    Ui.DarkBtnBg, Ui.DarkBtnHover,
-                                    Ui.SkipText, Ui.Accent, Math.Max(1, Sc(1)));
-            btnOk.Font = Ui.FontRowLabel;
-            btnOk.SetBounds(w - Sc(20) - Sc(120), Sc(72), Sc(120), Sc(32));
-            btnOk.Click += delegate
-            {
-                if (RequestAccept != null) RequestAccept(this, EventArgs.Empty);
-                CloseToast();
-            };
-            this.Controls.Add(btnOk);
 
             this.Size = new Size(w, h);
         }
@@ -5367,12 +5352,10 @@ namespace EyeLite
             }
         }
 
-        public void ShowToast(string title, string body, string buttonText,
-                              int x, int y, int autoCloseMs)
+        public void ShowToast(string title, string body, int x, int y, int autoCloseMs)
         {
             lblTitle.Text = title;
             lblBody.Text = body;
-            btnOk.Text = buttonText;
             this.Location = new Point(x, y);
             this.Show();
 
@@ -6767,6 +6750,12 @@ namespace EyeLite
         // 不设时零影响；生产环境不要设。
         private static readonly bool TogglePomodoroOnStart =
             Environment.GetEnvironmentVariable("EYE_LITE_TOGGLE_POMODORO") == "1";
+
+        // 测试设施：EYE_LITE_DUMP_ICON=<路径.png> 时把每次画出来的托盘图标位图存盘。
+        // 用途：从程序外部拿不到任务栏图标的像素（截屏会把用户桌面拍进去，本项目的纪律不允许），
+        // 而"番茄模式与普通模式的图标必须不同"这件事只能用位图本身来判。不设时零影响。
+        private static readonly string IconDumpPath =
+            Environment.GetEnvironmentVariable("EYE_LITE_DUMP_ICON") ?? "";
 
         private static bool ReadOpenSettings()
         {
@@ -8699,6 +8688,14 @@ namespace EyeLite
             screenSignature = "";          // 参数变了，下次休息重建窗体（换配色）
             if (!isResting) ResetWork();   // 换节奏 = 本轮重新算，避免"切完马上就弹"
             UpdateTrayText();
+
+            // **必须强制重画一次图标**。
+            // UpdateTrayProgressIcon 只在"剩余整分钟数变了"时才动笔，而切模式时
+            // 剩余分钟很可能没变（20 分钟切番茄后仍是 20 分钟那一格），
+            // 不重置 lastIconMinute 的话图标会一直留着旧模式的样子 ——
+            // 用户看到的就是"切了但图标没变"。
+            lastIconMinute = -1;
+            UpdateTrayProgressIcon();
             ShowModeToast(on);
         }
 
@@ -8713,26 +8710,20 @@ namespace EyeLite
                 if (modeToast == null || modeToast.IsDisposed)
                 {
                     modeToast = new ModeToastForm();
-                    modeToast.RequestAccept += delegate
-                    {
-                        // 点「开始专注」= 从此刻重新起算一个完整专注周期（对齐 ProjectEye
-                        // 的"点开始才真正开始"）；退出模式那张卡点「知道了」什么都不做。
-                        if (cfg.PomodoroEnabled && !isResting) ResetWork();
-                    };
                 }
 
                 string title = entering ? "已切换到番茄钟" : "已退出番茄钟";
                 string body = entering
-                    ? "专注 " + cfg.PomodoroWork + " 分钟 · 休息 " + cfg.PomodoroRest + " 分钟（再双击图标可退出）"
-                    : "回到护眼节奏：工作 " + cfg.WorkMinutes + " 分钟 · 休息 " + cfg.RestSeconds + " 秒";
-                string btn = entering ? "开始专注" : "知道了";
-
+                    ? "专注 " + cfg.PomodoroWork + " 分钟 · 休息 " + cfg.PomodoroRest
+                      + " 分钟 · 托盘图标带芯 · 再双击可退出"
+                    : "回到护眼节奏：工作 " + cfg.WorkMinutes + " 分钟 · 休息 "
+                      + cfg.RestSeconds + " 秒 · 托盘图标空心";
                 Rectangle wa = Screen.PrimaryScreen.WorkingArea;
                 int m = modeToast.MarginPx;
-                modeToast.ShowToast(title, body, btn,
+                modeToast.ShowToast(title, body,
                                     wa.Right - modeToast.Width - m,
                                     wa.Bottom - modeToast.Height - m,
-                                    30000);
+                                    3000);      // 用户要求：3 秒内消失
             }
             catch { }
         }
@@ -9136,7 +9127,7 @@ namespace EyeLite
         /// GDI 句柄纪律：Icon.FromHandle 不拥有句柄，每次重绘前必须 DestroyIcon 上一帧，
         /// 否则句柄会随分钟数一路涨上去（任务栏图标不像普通控件，泄漏是永久的）。
         /// </summary>
-        private static Icon MakeProgressIcon(float progress, Color fill)
+        private static Icon MakeProgressIcon(float progress, Color fill, bool pomodoro)
         {
             if (progress < 0f) progress = 0f;
             if (progress > 1f) progress = 1f;
@@ -9162,6 +9153,27 @@ namespace EyeLite
                             g.DrawArc(p, ringRect, -90f, progress * 360f);
                         }
                     }
+
+                    // 番茄钟模式：环心补一个实心圆点。
+                    //
+                    // 为什么用这个记号：托盘图标实际只有 16x16，"空心环 / 带芯环"是这种
+                    // 尺寸下还分得清的最简差别（换颜色不行 —— 颜色已经在表达剩余时间了，
+                    // 再拿颜色编码模式会互相打架）。10x10 的圆点缩到 16px 还有 5px 直径。
+                    if (pomodoro)
+                    {
+                        using (SolidBrush core = new SolidBrush(fill))
+                        {
+                            g.FillEllipse(core, 11, 11, 10, 10);
+                        }
+                    }
+                }
+
+                // 测试设施：存盘一份（见 IconDumpPath 的注释）。必须在 GetHicon 之前
+                // 拿位图存，之后位图会被释放。
+                if (IconDumpPath.Length > 0)
+                {
+                    try { bmp.Save(IconDumpPath, System.Drawing.Imaging.ImageFormat.Png); }
+                    catch { }
                 }
 
                 // 用 Clone 拿一个"自己拥有句柄"的 Icon 再返回。
@@ -9262,7 +9274,7 @@ namespace EyeLite
             Icon prev = lastProgressIcon;
             try
             {
-                Icon ic = MakeProgressIcon(progress, fill);
+                Icon ic = MakeProgressIcon(progress, fill, cfg.PomodoroEnabled);
                 lastProgressIcon = ic;
                 tray.Icon = ic;      // NotifyIcon 会给 shell 一份副本，之后释放本对象是安全的
             }
