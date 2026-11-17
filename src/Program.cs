@@ -5685,13 +5685,12 @@ namespace EyeLite
         private const int FirstRowTop = 38;
         private const int RowHeight = 32;       // 所有行（复选 / 数值）统一 32
         private const int CheckHeight = 26;
-        // 框宽是怎么定下来的（试过 96 → 80 → 64 → 54 → 48）：
-        //   UpDownButtons 在控件右侧固定吃掉约 28px（150% 下 42px），
-        //   所以"数字区"= 控件宽 − 42。框越宽，数字占的比例越小、左边空白越大，
-        //   用户看到的就从一个输入框变成了"一个空框里漂着几个小符号"。
-        //   48 → 控件 72px 物理、数字区 30px：两位数字占 ~70%、三位数字刚好放得下。
-        // 注意不能再窄：三位数（120 / 180）就是这里的下限。
-        private const int NumWidth = 48;
+        // 框宽是怎么定下来的（96 → 80 → 64 → 54 → 48 → 42）：
+        //   去掉上下箭头之前，UpDownButtons 固定吃掉右侧约 42px（150%），
+        //   框越宽数字占比越小、左边空白越大，看着像"空框里漂着几个小符号"；
+        //   去掉箭头之后整块宽度都归数字，42 就是"三位数（120/180）居中刚好、
+        //   两侧各留 ~16px"的宽度 —— 再窄三位数就要贴边了。
+        private const int NumWidth = 42;
         // 26 是"15pt 粗体还不裁字"能用的高度：150% 下行高约 40px，控件 26×1.5=39px。
         // 再想放大就得动 RowHeight，而 RowHeight 一动 9 行卡片全部重排、整页高度重算。
         private const int NumHeight = 26;
@@ -6185,10 +6184,9 @@ namespace EyeLite
             n.Value = val;
             n.Font = Ui.FontNumInput;     // 比标签大一号，见 FontNumInput 的注释
             n.BorderStyle = BorderStyle.None;
-            // **居中，不是右对齐**。
-            // 右对齐时数字紧贴着右边的上下箭头，左侧留一大片空白，看着像"一堆小符号挤在角落"；
-            // 居中之后数字在文本区正中间，两侧留白对称，比例才正常。
-            n.TextAlign = HorizontalAlignment.Right;
+            // **居中**。右对齐会让数字贴着框的右边缘、左边留一大片空白；
+            // 箭头去掉之后编辑框是整块宽度，居中才是真正的居中（两侧留白对称）。
+            n.TextAlign = HorizontalAlignment.Center;
 
             // **去掉上下箭头**。这是"数字占比奇怪"的真正原因：
             // UpDownButtons 在控件右侧固定吃掉约 28px（150% 下 42px），
@@ -6203,7 +6201,8 @@ namespace EyeLite
             n.AutoSize = false;
             int numH = Sc(NumHeight);
             // x 只有左内边距 Sc(6)；y 只在容器内居中，**不再加 top**（父容器已带 top）
-            n.SetBounds(Sc(6), (boxH - numH) / 2, Sc(NumWidth), numH);
+            n.SetBounds(0, (boxH - numH) / 2, boxW, numH);   // 占满容器，左右各留圆角描边的位置
+            HideSpinButtons(n);
 
             // 焦点反馈：输入框没有自己的边框，只能用容器的描边色表达"这个框被选中了"。
             // 用 PrimaryBg(#1F2937) 而不是 Accent(#5FD3A6)：薄荷绿在白卡片上对比太低，
@@ -6221,6 +6220,51 @@ namespace EyeLite
 
             box.Controls.Add(n);
             return n;
+        }
+
+        /// <summary>
+        /// 去掉数值框右侧的上下小箭头，并让内部编辑框占满整块宽度。
+        ///
+        /// 为什么要去掉：那是 WinForms 原生的 `UpDownButtons`，系统主题画的小三角形，
+        /// 跟这套自绘的扁平圆角完全不搭 —— 用户原话「上下按钮也别扭，整体很违和」。
+        ///
+        /// 为什么不能只设 `Visible = false`：`UpDownBase` 的布局是按
+        /// `upDownButtons.Width` 算编辑框宽度的，隐藏子控件**不触发重排**
+        /// （`PerformLayout()` 也不管用，实测文字仍只在左侧 68px 里居中、右边空一条）。
+        /// 所以这里做两件事：隐藏按钮 + 手动把另一个子控件（编辑框）撑满，
+        /// 并挂到 SizeChanged 上，防止后续任何一次布局把它缩回去。
+        ///
+        /// 代价：鼠标不能点箭头加减。滚轮、直接输入、Tab 都还在，设置页这种低频输入够用。
+        /// </summary>
+        private static void HideSpinButtons(NumericUpDown n)
+        {
+            for (int i = 0; i < n.Controls.Count; i++)
+            {
+                Control c = n.Controls[i];
+                if (c == null) continue;
+                if (c.GetType().Name == "UpDownButtons")
+                {
+                    c.Visible = false;
+                }
+                else
+                {
+                    c.Dock = DockStyle.Fill;
+                }
+            }
+
+            // 兜底：WinForms 在 SizeChanged 时会重排一次，可能把编辑框按按钮宽度缩回去。
+            n.SizeChanged += delegate
+            {
+                for (int i = 0; i < n.Controls.Count; i++)
+                {
+                    Control c = n.Controls[i];
+                    if (c == null || c.GetType().Name == "UpDownButtons") continue;
+                    if (c.Dock != DockStyle.Fill) c.Dock = DockStyle.Fill;
+                    int w = n.ClientSize.Width;
+                    int h = n.ClientSize.Height;
+                    if (w > 0 && (c.Width != w || c.Height != h)) c.Bounds = new Rectangle(0, 0, w, h);
+                }
+            };
         }
 
         private CheckBox AddCheck(RoundPanel card, int top, string text, bool val)
