@@ -18,7 +18,7 @@
       "frameSpec": "2 帧 850x567 JPG（照片）"
     }
   ],
-  "totalBytes": 929258,
+  "totalBytes": 985859,
   "moves": [
     {
       "id": "calf-stretch",
@@ -26,13 +26,20 @@
       "repo": "bryllim/workout-guide",
       "slug": "wall-calf-stretch",
       "license": "CC BY-SA 4.0",
-      "frames": 3,
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
       "files": [
         "assets/moves/calf-stretch/frame1.png",
         "assets/moves/calf-stretch/frame2.png",
         "assets/moves/calf-stretch/frame3.png"
       ],
-      "note": "双手扶墙、一腿后撤脚跟压地。替代\"颈部放松\"：workout-guide 302 条无颈部动作，everkinetic 只有半身像（风格不统一、动作读不出），已弃用。"
+      "note": "双手扶墙、一腿后撤脚跟压地。替代\"颈部放松\"：workout-guide 302 条无颈部动作，everkinetic 只有半身像（风格不统一、动作读不出），已弃用。",
+      "nameZh": "扶墙小腿拉伸",
+      "frameCount": 3,
+      "bytes": 78100
     },
     {
       "id": "chest-open",
@@ -62,13 +69,20 @@
       "repo": "bryllim/workout-guide",
       "slug": "lateral-lunge",
       "license": "CC BY-SA 4.0",
-      "frames": 3,
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
       "files": [
         "assets/moves/lateral-lunge/frame1.png",
         "assets/moves/lateral-lunge/frame2.png",
         "assets/moves/lateral-lunge/frame3.png"
       ],
-      "note": "站立、无器械、左右侧向下蹲。替代\"躯干转体\"：全量 302 条里没有可用的转体素材（russian-twist 有药球、torso-twist-stretch 手持杠片）。"
+      "note": "站立、无器械、左右侧向下蹲。替代\"躯干转体\"：全量 302 条里没有可用的转体素材（russian-twist 有药球、torso-twist-stretch 手持杠片）。",
+      "nameZh": "侧弓步",
+      "frameCount": 3,
+      "bytes": 116278
     },
     {
       "id": "march-in-place",
@@ -94,10 +108,14 @@
     },
     {
       "id": "scapular-retraction",
-      "nameZh": "肩胛后缩",
+      "nameZh": "单臂横跨胸前",
       "source": "bryllim/workout-guide",
       "sourceSlug": "cross-body-shoulder-stretch",
-      "frames": 3,
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
       "frameCount": 3,
       "bytes": 103185,
       "attribution": {
@@ -117,7 +135,11 @@
       "nameZh": "肩颈绕环",
       "source": "bryllim/workout-guide",
       "sourceSlug": "arm-circles",
-      "frames": 3,
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
       "frameCount": 3,
       "bytes": 115309,
       "attribution": {
@@ -159,9 +181,13 @@
       "nameZh": "起身伸展",
       "source": "bryllim/workout-guide",
       "sourceSlug": "worlds-greatest-stretch",
-      "frames": 1,
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
       "frameCount": 3,
-      "bytes": 73991,
+      "bytes": 107305,
       "attribution": {
         "creator": "Bryl Lim",
         "creatorUrl": "https://bryllim.com",
@@ -170,16 +196,20 @@
         "sourceUrl": "https://github.com/bryllim/workout-guide",
         "changes": ""
       },
-      "note": "单帧：jumping-jack 的 f1 是唯一\"无器械 + 双臂过头 + 直立全身\"的一张，缺点是双脚分开。三帧都指向同一张图（乒乓播放时视觉静止）。",
+      "note": "三帧为 jumping-jack 的上举/平举/放下；站姿双脚略分开，非并腿。",
       "action": "起身伸展",
       "slug": "jumping-jack"
     },
     {
       "id": "wall-stand",
-      "nameZh": "靠墙站立",
+      "nameZh": "靠墙静蹲",
       "source": "bryllim/workout-guide",
       "sourceSlug": "wall-sit",
-      "frames": 3,
+      "frames": [
+        "frame1.png",
+        "frame2.png",
+        "frame3.png"
+      ],
       "frameCount": 3,
       "bytes": 107312,
       "attribution": {
@@ -190,7 +220,7 @@
         "sourceUrl": "https://github.com/bryllim/workout-guide",
         "changes": ""
       },
-      "note": "f1/f2 是屈膝 90 度的静蹲、f3 站起 —— 三帧一起播才看得出\"蹲\"这个动作。早期误用 f3（直立贴墙）当\"靠墙站立\"，已改为静蹲并加禁忌词「膝」。",
+      "note": "三帧为 jumping-jack 的上举/平举/放下；站姿双脚略分开，非并腿。",
       "action": "靠墙静蹲",
       "slug": "wall-sit"
     }

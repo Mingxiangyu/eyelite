@@ -6,7 +6,7 @@ P1 批 2/3 验收脚本：Movement(G1/G2/G11) / E1 跳过配额 / E6 锁前倒�
 ## 先说三条"读源码后才知道"的硬约束（不遵守就会得到一堆假 FAIL）
 
 1. **演示窗只挂在 bodyBreak 上**（Program.cs:6352 `if (bodyBreak) { ShowMovementForRest(...); ... }`）。
-   普通护眼休息（到点弹的那种）**永远没有** 720×640 / 320×360 小窗 —— 这是刻意的设计
+   普通护眼休息（到点弹的那种）**永远没有**动作演示窗 / 仪式窗 —— 这是刻意的设计
    （注释原文：护眼休息时在屏幕正中弹一个会动的窗，等于把视线钉回屏幕上）。
 2. **bodyBreak 只能由久坐时钟触发**，`sedLimitMs = SedentaryMinutes * 60s`（Program.cs:5323），
    而 `SedentaryMinutes` 的钳制范围是 **15~180**（Program.cs:3109）→ 自然等待最短也要 15 分钟。
@@ -32,20 +32,28 @@ P1 批 2/3 验收脚本：Movement(G1/G2/G11) / E1 跳过配额 / E6 锁前倒�
 ### Movement（插件 Plugin_Movement）
 配置：`SedentaryEnabled=1, SedentaryMinutes=15, SedentarySeconds=20, WorkMinutes=20`
       + 环境变量 `EYE_LITE_FAKE_SED_MS=900000`（久坐累积钉到 15 分钟 → bodyBreak 立即到点）
-  · **G1** `MovementContraindications=""` → 遮罩出现后应出现 **720×640**（允许 ±6px DPI 误差）
-    的窗口；子窗口/标题为空是正常的（MoveForm 全部自绘，见 2606 行），所以判据只认尺寸+属性。
-  · **G2 动画**：对 720×640 窗口客户区**连抓 3 帧、间隔 0.8s**，判据分三档：
+  · **G1** `MovementContraindications=""` → 遮罩出现后应出现**动作演示窗**。
+    尺寸/宽高比见 `find_move_window()`（v1.6.0 起是 720×800），**判据不写死像素**：
+    子窗口/标题为空是正常的（MoveForm 全部自绘），所以只认尺寸+样式位。
+  · **G2 动画**：对演示窗客户区**连抓 3 帧、间隔 0.8s**，判据分三档：
       - 任意两帧指纹不同 → 画面在动 → PASS
       - 三帧全同 → 才判 FAIL（先排除"两次抓的是同一帧"：MoveForm 是 16ms 帧，
         间隔 0.8s 抓 3 次仍全同，说明定时器真的没在跑）
       - 三种抓图方式全失败 → SKIP（判"仪器不成立"），**不**用"文本不同"冒充动画
         （MoveForm 没有子控件，文本法本来就不成立）
   · **G11**（本批最重要）：
-      - `=""` → 有 720×640（6 个动作全可用）
-      - `="腰椎"` → **仍有** 720×640（还剩 3 个动作）
-      - `="腰椎;脊柱;膝;髋;颈椎;肩袖;肩;腕;腱鞘;腕管"` → **没有** 720×640，但**遮罩必须正常**
+      - `=""` → 有演示窗（9 个动作全可用）
+      - `="腰椎"` → **仍有**演示窗。注意匹配是**双向包含**，写「腰椎」会同时命中
+        禁忌词「腰椎」和「腰」→ 排除 4 个（起身伸展/深蹲/靠墙静蹲/侧弓步），
+        剩下 5 个（肩颈绕环/原地踏步/扶墙小腿拉伸/单臂横跨胸前/扩胸）
+      - `=<全部动作禁忌词的并集>` → **没有**演示窗，但**遮罩必须正常**
         （全部动作被排除 = 安静休息，且不能退回去弹 Ritual）
-      - 对照：`Plugin_Movement=0` → 没有 720×640（**必跑**，见下）
+        ⚠ 这个并集**不再写死在脚本里**，由 `all_forbidden_words()` 从
+        `src/Program.cs` 的 `MoveLib.Build()` 现场解析。原因：动作表换过素材之后，
+        手写清单里的「腕/腱鞘/腕管」在产品里已经不存在，而新增的「跟腱/小腿」没人补，
+        结果扶墙小腿拉伸永远命中不了 → G11 恒定 FAIL，看着像产品 bug，实为测试陈旧。
+        解析失败时才退回手写清单，并打印 `!!` 警告要求手工同步。
+      - 对照：`Plugin_Movement=0` → 没有演示窗（**必跑**，见下）
     > **为什么 `movementctl` 不能省**：`=""` 与"全部排除"是同一二进制、同一配置、
     > 只差一行禁忌词的组内对照 —— 这能证明"禁忌过滤生效"，但证明不了"没有窗口"
     > 是因为过滤而**不是插件根本没工作**。所以 `Plugin_Movement=0` 这条对照必跑
@@ -120,6 +128,7 @@ import ctypes
 import ctypes.wintypes as wt
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import time
@@ -129,6 +138,7 @@ EXE = os.path.join(ROOT, 'EyeLite.exe')
 CFG_DIR = os.path.join(os.environ.get('APPDATA', ''), 'EyeLite')
 CFG = os.path.join(CFG_DIR, 'config.ini')
 PROBE_DIR = os.path.join(ROOT, 'tools', '_probe')
+SRC = os.path.join(ROOT, 'src', 'Program.cs')
 
 user32 = ctypes.WinDLL('user32', use_last_error=True)
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -363,6 +373,35 @@ def transparent_fullscreen():
     return [(hwnd, w, h) for hwnd, w, h, _p in own_windows()
             if w > 800 and h > 500 and (ex_style(hwnd) & WS_EX_TRANSPARENT)
             and child_count(hwnd) == 0]
+
+
+# 演示窗的逻辑尺寸：v1.6.0 从 720x640 加高到 720x800（放大动作形象后 640 装不下人形，
+# 靠加高窗口解决，而不是把人缩小）。**故意不留常量** —— 尺寸是"会变的事实"，
+# 写死一个 MOVE_SIZE 只会诱导后来人拿它当判据，改窗口尺寸时再改一次测试。
+# 认窗口请用 find_move_window()（宽高比 + 样式位），与像素无关。
+
+
+def find_move_window():
+    """认"动作演示窗"，不依赖具体像素。
+
+    判据（同时满足）：
+      · 可见、非 WS_EX_TRANSPARENT（排除压暗层/辉光层）
+      · 宽高比在 0.80~1.00 之间（1080x1200=0.90 命中；全屏 3840x2160=1.78 被排除；
+        RestForm 也是 1.78，同样被排除）
+      · 宽 >= 700、高 >= 700 且高 < 屏幕高（排除全屏遮罩）
+    """
+    out = []
+    for hw, a, b, _pid in own_windows():      # own_windows() 的 4 元组是 (hwnd, w, h, pid)
+        if ex_style(hw) & WS_EX_TRANSPARENT:
+            continue
+        if a < 700 or b < 700:
+            continue
+        if b >= 2000:                      # 全屏遮罩
+            continue
+        ratio = float(a) / float(b) if b else 0
+        if 0.80 <= ratio <= 1.00:
+            out.append((hw, a, b))
+    return out
 
 
 def find_by_size(w, h, tol=6):
@@ -708,13 +747,58 @@ FAKE_SED_MS = 900000              # = 15 分钟，等于 SedentaryMinutes 的下
 BODY_BREAK_TIMEOUT = 150          # 有钩子时几秒就到；150s 没来 = 钩子未生效，判 SKIP
 
 
+# 「全部排除」用例的禁忌词**必须覆盖当前动作表里的每一个 Forbidden 词**。
+# 硬编码清单在动作表换过一次素材之后（9 个动作全换成肌肉线稿）就必然过期：
+# 老清单里有「腕/腱鞘/腕管」，新动作表里已经没有这些词，而新增的「跟腱/小腿」却没人写
+# → 扶墙小腿拉伸永远命中不了 → G11 永远 FAIL，看起来像产品 bug，其实是测试陈旧。
+# 所以这里直接从 src/Program.cs 的 MoveLib.Build() 里把词抠出来，动作表变了自动跟上。
+_MOVEITEM_RE = re.compile(
+    r'new\s+MoveItem\(\s*"([^"]*)"\s*,\s*'      # name
+    r'\d+\s*,\s*\d+\s*,\s*'                     # seconds, cycleSeconds
+    r'"[^"]*"\s*,\s*'                           # tips
+    r'new\s+string\[\]\s*\{([^}]*)\}',          # forbidden[]
+    re.S)
+
+
+def move_lib_actions():
+    """从源码解析出 (动作名, [禁忌词...]) 列表。解析失败返回空列表，由调用方降级。"""
+    try:
+        with open(SRC, 'rb') as f:
+            text = f.read().decode('utf-8', 'replace')
+    except IOError:
+        return []
+    out = []
+    for m in _MOVEITEM_RE.finditer(text):
+        name = m.group(1)
+        words = re.findall(r'"([^"]*)"', m.group(2))
+        out.append((name, [w.strip() for w in words if w.strip()]))
+    return out
+
+
+def all_forbidden_words():
+    """全部动作的禁忌词并集（去重、保序）。
+
+    注意匹配是**双向包含**（Program.cs MoveLib.IsExcluded）：写「膝」就同时命中「膝」和
+    「膝关节」，写「腰」就命中「腰」和「腰椎」。所以并集里出现词根即可，不必逐字列全；
+    但这里仍然全列，多写无害、少写才会假 FAIL。
+    """
+    acts = move_lib_actions()
+    words, seen = [], set()
+    for _name, ws in acts:
+        for w in ws:
+            if w not in seen:
+                seen.add(w)
+                words.append(w)
+    return acts, words
+
+
 # ---------------------------------------------------------------- 用例
 
 
 def case_movement(base_orig, results, plugin_on=True, contra='', label='G1/G2',
                   expect_window=True):
-    """跑一次 bodyBreak，判定 720×640 演示窗是否出现（并在出现时验动画）。"""
-    print('\n--- Movement %s：contraindications=%r 期望 %s720×640 ---'
+    """跑一次 bodyBreak，判定动作演示窗是否出现（并在出现时验动画）。"""
+    print('\n--- Movement %s：contraindications=%r 期望 %s有演示窗 ---'
           % (label, contra, '' if expect_window else '**没有**'))
     if not stop_eyelite():
         results.append(('Movement %s' % label, False, 'EyeLite 实例停不下来'))
@@ -743,14 +827,14 @@ def case_movement(base_orig, results, plugin_on=True, contra='', label='G1/G2',
         return
     print('  遮罩 %.0fs 出现（有钩子时应在 1~3s）' % t_ov)
 
-    hit, wins = wait_pred(lambda: find_by_size(720, 640) or None, 6.0)
+    hit, wins = wait_pred(lambda: find_move_window() or None, 6.0)
     kids_txt = []
     anim = 'n/a'
     hashes = []
     if wins:
         hwnd = wins[0][0]
         kids_txt = child_texts(hwnd)
-        print('  720×640 窗口：%s  子窗口文本=%s' % (describe(hwnd), kids_txt))
+        print('  演示窗：%s  子窗口文本=%s' % (describe(hwnd), kids_txt))
         # 连抓 3 帧、间隔 0.8s：两帧相同不足以判"没动"（可能恰好在同一帧边界），
         # 三帧全同才判 FAIL。MoveForm 是 16ms 帧，0.8s 间隔抓 3 次仍全同 = 定时器没跑。
         cap_fail = None
@@ -770,11 +854,11 @@ def case_movement(base_orig, results, plugin_on=True, contra='', label='G1/G2',
             print('  抓图 3 帧：%s → 不同指纹 %d 个 → %s'
                   % ([h[:8] for _m, h in hashes], uniq, anim))
     else:
-        print('  6s 内没有 720×640 窗口')
+        print('  6s 内没有动作演示窗')
 
     if expect_window:
         ok = bool(wins)
-        detail = ('遮罩 %.0fs；720×640=%s；动画=%s；动作名文本=%s'
+        detail = ('遮罩 %.0fs；演示窗=%s；动画=%s；动作名文本=%s'
                   % (t_ov, '有' if wins else '无', anim, kids_txt))
         results.append(('Movement %s' % label, ok, detail))
         # G2 单独一条（仅当窗口在时才判定，抓图失败判 SKIP）
@@ -793,7 +877,7 @@ def case_movement(base_orig, results, plugin_on=True, contra='', label='G1/G2',
     else:
         ok = (not wins) and bool(overlay_windows())
         results.append(('Movement %s' % label, ok,
-                        '遮罩 %.0fs 正常；720×640=%s（期望无）'
+                        '遮罩 %.0fs 正常；演示窗=%s（期望无）'
                         % (t_ov, '有' if wins else '无')))
 
 
@@ -1196,8 +1280,18 @@ def main():
         if 'movement' in plan:
             case_movement(orig, results, True, '', 'G1 无禁忌', True)
             case_movement(orig, results, True, '腰椎', 'G11 腰椎', True)
-            case_movement(orig, results, True, '腰椎;脊柱;膝;髋;颈椎;肩袖;肩;腕;腱鞘;腕管',
-                          'G11 全部排除', False)
+            acts, words = all_forbidden_words()
+            if len(acts) >= 1 and words:
+                print('\n  动作表 %d 个：%s' % (len(acts), '、'.join(n for n, _w in acts)))
+                print('  全部排除用词（%d 个）：%s' % (len(words), ';'.join(words)))
+                all_contra = ';'.join(words)
+            else:
+                # 源码解析不出来（路径变了 / 写法改了）→ 退回手写清单并明确提示。
+                # 手写清单只能保证"覆盖这一版动作表"，改动作表时必须回来同步。
+                all_contra = '腰椎;脊柱;膝;髋;颈椎;肩袖;肩;跟腱;小腿;腰;膝关节'
+                print('\n  !! 未能从 src/Program.cs 解析动作表，退回手写禁忌词清单：%s'
+                      % all_contra)
+            case_movement(orig, results, True, all_contra, 'G11 全部排除', False)
         if 'movementctl' in plan:
             case_movement(orig, results, False, '', '对照 Plugin=0', False)
         if 'settings' in plan:

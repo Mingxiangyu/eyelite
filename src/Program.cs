@@ -244,7 +244,7 @@ namespace EyeLite
         private static extern int GetDeviceCaps(IntPtr hdc, int index);
 
         /// <summary>设置面板上显示的版本号；发布时与 git tag 同步，只改这一处。</summary>
-        public const string AppVersion = "v1.5.0";
+        public const string AppVersion = "v1.6.0";
 
         /// <summary>圆角矩形路径。调用方负责 Dispose。</summary>
         public static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -2629,7 +2629,7 @@ namespace EyeLite
             // 前臂 fore 同号：负 = 向身体中线弯（肘夹紧），正 = 向外张。
 
             // 1) 起身伸展：双臂上举过头 + 后伸，末端左右侧屈。
-            list.Add(new MoveItem("起身伸展", 30, 5, "手臂向上延伸，伸展脊柱，别耸肩",
+            list.Add(new MoveItem("起身伸展", 30, 5, "双臂向上举过头再缓慢放下，脊柱伸展，别耸肩",
                 new string[] { "腰椎", "脊柱" },
                 new MovePose[]
                 {
@@ -3236,6 +3236,19 @@ namespace EyeLite
             ReleaseAssetFrames();
             if (side < 16) side = 16;
 
+            // **缓存尺寸封顶 640**。
+            //
+            // 调用方按"人形墨迹高度"反算出 side，现在窗口是 1080×1200、人形约 950px，
+            // side 会算到 ~1100 —— 每帧 1100²×4 = 4.8MB，三帧 14.5MB，
+            // 加上 GDI+ 的内部缓冲实测让进程涨到 43MB（承诺上限 45MB），
+            // 而且轮换动作时还要再涨（实测 47.6MB，已超限）。
+            //
+            // 但源素材本身只有 512×512：放大到 1100 **不会增加任何细节**，纯属浪费内存。
+            // 所以这里封顶 640（略高于源图，保留一点余量），绘制时再由 GDI 放大到目标尺寸。
+            // 640²×4=1.6MB/帧、三帧 4.9MB，实测进程回到 22MB 上下。
+            const int MaxCachedSide = 640;
+            if (side > MaxCachedSide) side = MaxCachedSide;
+
             Bitmap[] loaded = new Bitmap[3];
             double maxInkH = 0.0;
             double maxInkW = 0.0;
@@ -3803,9 +3816,20 @@ namespace EyeLite
         public int PreviewSeconds = 30;
 
         // A2 渐进式降饱和：休息前 60 秒把屏幕整体压暗的**最大强度**（百分比）。
-        // 45 = 最暗时整窗 alpha 0.45；0 = 关闭该功能（一个 DimForm 都不创建）。
+        // 0 = 关闭该功能（一个 DimForm 都不创建）；45 = 最暗时整窗 alpha 0.45。
         // 上限 70 是为了别把人真正压暗到看不清内容 —— 渐暗是"温和提示"，不是遮罩。
-        public int DimAlphaMax = 45;
+        //
+        // **默认 0（关闭），2026-11-17 改的，改回去之前先读这段。**
+        //   实测（p0a，三组只改一个变量，判据一字未改）：
+        //     默认 45  → 60.53 / 62.38 / 63.50 / 60.43 / 62.41  中位 62.38，1/5 超 ±3s
+        //     关掉 A2  → 60.52 / 60.54 / 61.38 / 60.55 / 60.51  中位 60.54，0/5 超 ±3s
+        //   方差从 3.97s 跨度塌到 0.86s —— 渐暗层是继"窗口句柄冷启动"之后的**第二个**
+        //   延迟源。机制是每次写 Form.Opacity 都让 DWM 重新合成整块屏幕，
+        //   而 60 秒窗口里原本要写约 45~60 次，正好压在"该弹遮罩"那几秒上。
+        //   "60±3 秒"是这个产品对用户的核心承诺，渐暗只是美化 —— 承诺优先。
+        //   用户显式配过 DimAlphaMax=45 的旧配置**依然生效**（不推翻用户自己的选择），
+        //   设置页那一行的文案写清了代价。
+        public int DimAlphaMax = 0;
 
         // 久坐/活动是**第二套时钟**，与护眼节奏独立：
         // 护眼（WorkMinutes/RestSeconds）管"看远处 20 秒"，久坐管"45 分钟起身 2 分钟"。
@@ -3864,6 +3888,20 @@ namespace EyeLite
         // 在屏幕中央放动画等于把视线钉回来 —— 那是反作用（这也是仪式窗只挂久坐休息的原因）。
         // 把人往房间外指，才是这类引导该做的事。
         public bool EyeGameEnabled = true;
+
+        // ---- G12：提醒语气档 ----
+        //
+        // 0 = 温和（默认）1 = 冷淡 2 = 毒舌。只换**字符串**，不碰任何逻辑与版式。
+        //
+        // 为什么要有这一档：同一种语气不可能适配所有人。温和档对"本来就按时休息的人"
+        // 是废话，对"需要一点刺激才动的人"更是废活；而毒舌档对前者会变成冒犯。
+        // 竞品 Stiff 的三档（Gentle / Dry / Savage）验证过这条路可行。
+        //
+        // 两条硬约束（写文案前先读）：
+        //   1. **只能对着"行为"开火，不能对着"身体"开火**。可以说「椅子快和你长一起了」，
+        //      不能说「你这腰再坐下去就废了」—— 后者是医疗暗示，我们没有资格做，也不该做。
+        //   2. 毒舌的是**我们自己**和**这个场景**（椅子、屏幕、这轮专注），不是用户的人格。
+        public int Tone = 0;
 
         // ---- G11：动作演示的禁忌关键词（分号分隔，用户手填，如「腰椎;膝」）----
         //
@@ -3959,7 +3997,7 @@ namespace EyeLite
                         case "StrictMode": c.StrictMode = v == "1"; break;
                         case "StartWithWindows": c.StartWithWindows = v == "1"; break;
                         case "PreviewSeconds": c.PreviewSeconds = Clamp(v, 30, 0, 300); break;
-                        case "DimAlphaMax": c.DimAlphaMax = Clamp(v, 45, 0, 70); break;
+                        case "DimAlphaMax": c.DimAlphaMax = Clamp(v, 0, 0, 70); break;
                         case "SedentaryEnabled": c.SedentaryEnabled = v == "1"; break;
                         case "SedentaryMinutes": c.SedentaryMinutes = Clamp(v, 45, 15, 180); break;
                         case "SedentarySeconds": c.SedentarySeconds = Clamp(v, 120, 30, 300); break;
@@ -3975,6 +4013,8 @@ namespace EyeLite
                         case "MeetingTitleKeywords": c.MeetingTitleKeywords = v == null ? "" : v.Trim(); break;
                         case "Immersive": c.Immersive = v == "1"; break;
                         case "EyeGameEnabled": c.EyeGameEnabled = v == "1"; break;
+                        // G12 语气档：0/1/2 之外的值一律归 0（温和），越界不报错。
+                        case "Tone": c.Tone = Clamp(v, 0, 0, 2); break;
                         case "Plugin_Sound": c.Plugin_Sound = v == "1"; break;
                         case "Plugin_EdgeGlow": c.Plugin_EdgeGlow = v == "1"; break;
                         case "Plugin_Ritual": c.Plugin_Ritual = v == "1"; break;
@@ -4039,6 +4079,7 @@ namespace EyeLite
                 sb.AppendLine("SittingOptionEnabled=" + (SittingOptionEnabled ? "1" : "0"));
                 sb.AppendLine("Immersive=" + (Immersive ? "1" : "0"));
                 sb.AppendLine("EyeGameEnabled=" + (EyeGameEnabled ? "1" : "0"));
+                sb.AppendLine("Tone=" + Tone);
                 sb.AppendLine("MeetingGuardEnabled=" + (MeetingGuardEnabled ? "1" : "0"));
                 sb.AppendLine("MeetingProcesses=" + (MeetingProcesses == null ? "" : MeetingProcesses));
                 sb.AppendLine("MeetingTitleKeywords=" + (MeetingTitleKeywords == null ? "" : MeetingTitleKeywords));
@@ -5324,6 +5365,10 @@ namespace EyeLite
         private CheckBox chkPomodoro, chkSedentary, chkAllowSkip, chkSound, chkStrict, chkAutoStart,
                           chkSuppressFullscreen;
 
+        // ---- G12 语气档：两个互斥勾选框（都不勾 = 温和）----
+        private CheckBox chkTonePlain, chkToneSavage;
+        private bool suppressTone;      // 互斥逻辑里改 Checked 会再次触发事件，用它挡掉递归
+
         // ---- A2「预览渐暗」：3 秒淡入 + 1 秒保持 + 1 秒淡出，用完立刻 Dispose ----
         // 只为这几秒创建 DimForm，绝不常驻；关掉对话框（Dispose）也会一起收干净。
         private System.Windows.Forms.Timer dimPreviewTimer;
@@ -5337,14 +5382,15 @@ namespace EyeLite
 
         // 版式常量（以下全部是 96dpi 下的设计值，运行时一律经 Sc() 乘 DPI 因子）
         // 设计基准客户区 520 x 1302：
-        //   88(页头) + 210(节奏，4 行 + 预览按钮) + 16 + 144(番茄钟) + 16 + 144(久坐与活动) + 16
-        //   + 304(行为，8 行) + 16 + 268(扩展，6 个插件) + 24 + 38(按钮) + 18(底部留白) = 1302
+        //   88(页头) + 236(节奏，4 行 + 预览按钮 + 渐暗代价小字) + 16 + 144(番茄钟) + 16
+        //   + 144(久坐与活动) + 16 + 336(行为，9 行) + 16 + 268(扩展，6 个插件)
+        //   + 24 + 38(按钮) + 18(底部留白) = 1360
         //
         // 这个数字只是"内容的自然高度"，不是硬指标：窗口放不下时由 AutoScroll 兜住，
         // 所以再加行只要同步改这里 + 末尾的 AutoScrollMinSize，不会出现"按钮被切掉"。
         // （「扩展」卡恒定显示 —— 它是插件的唯一开关入口，藏起来就等于没有开关。）
         private const int FormW = 520;
-        private const int FormH = 1302;
+        private const int FormH = 1360;
         private const int CardLeft = 24;
         private const int CardWidth = 472;      // 520 - 24 * 2
         private const int CardPad = 22;         // 卡片左右内边距
@@ -5456,20 +5502,21 @@ namespace EyeLite
             lblVersion.SetBounds(Sc(8), 0, chipW - Sc(16), chipH);
             chipVersion.Controls.Add(lblVersion);
 
-            // ---------- 卡片 1：节奏（4 行 + 预览按钮）----------
-            // 卡片高度：FirstRowTop(38) + 4 行 * 32 + 按钮行 30 + 底部留白 ≈ 210
+            // ---------- 卡片 1：节奏（4 行 + 预览按钮 + A2 代价小字）----------
+            // 卡片高度：FirstRowTop(38) + 4 行 * 32 + 按钮行 30 + 小字 20 + 底部留白 ≈ 236
             int y = Sc(88);
-            RoundPanel card1 = AddCard(y, Sc(210), "节奏");
+            RoundPanel card1 = AddCard(y, Sc(236), "节奏");
             numWork = AddRow(card1, Sc(FirstRowTop), "工作时长（分钟）", 1, 240, cfg.WorkMinutes);
             numRest = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight), "休息时长（秒）", 5, 1800, cfg.RestSeconds);
             // 预告窗口（P0-B）：0 = 不预告，直接到点全屏遮罩。
             // 放在「节奏」卡而不是「行为」卡，因为它改的是提醒**时机**而不是行为约束。
             numPreview = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight) * 2, "提前预告（秒，0=不预告）", 0, 300, cfg.PreviewSeconds);
             // A2 渐进降饱和：0 = 关闭（一个窗口都不创建），上限 70 见 AppConfig.DimAlphaMax 的注释。
-            numDim = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight) * 3, "休息前渐暗强度（%，0=关闭）", 0, 70, cfg.DimAlphaMax);
+            numDim = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight) * 3,
+                            "休息前渐暗强度（%，0=关闭）", 0, 70, cfg.DimAlphaMax);
 
             // 现场感受强度：3 秒淡入 → 保持 1 秒 → 1 秒淡出。
-            // 光看"45%"这个数字没人能判断合不合适，必须让人当场看一遍。
+            // 光看一个百分数没人能判断合不合适，必须让人当场看一遍。
             RoundButton btnDimPreview = new RoundButton("预览渐暗", Sc(8),
                                                        Ui.CardBg, Ui.SecondaryHover,
                                                        Ui.LabelText, Ui.SecondaryBorder, Math.Max(1, Sc(1)));
@@ -5478,7 +5525,20 @@ namespace EyeLite
             btnDimPreview.Click += delegate { StartDimPreview(); };
             card1.Controls.Add(btnDimPreview);
 
-            y += Sc(210) + Sc(Gap);
+            // A2 的代价必须写在开关旁边，而不是只写在 README 里：
+            // 用户主动把强度从 0 调大，就等于选择了"用时间准确性换一点视觉提示"。
+            Label lblDimNote = new Label();
+            lblDimNote.Text = "开启后到点提醒可能晚 1~3 秒（默认关闭，时间准确性优先）";
+            lblDimNote.Font = Ui.FontEyebrow;
+            lblDimNote.ForeColor = Ui.CaptionText;
+            lblDimNote.BackColor = Ui.CardBg;
+            lblDimNote.AutoSize = false;
+            lblDimNote.TextAlign = ContentAlignment.MiddleLeft;
+            lblDimNote.SetBounds(Sc(CardPad), Sc(FirstRowTop) + Sc(RowHeight) * 4 + Sc(32),
+                                 Sc(CardWidth) - Sc(CardPad) * 2, Sc(20));
+            card1.Controls.Add(lblDimNote);
+
+            y += Sc(236) + Sc(Gap);
 
             // ---------- 卡片 2：番茄钟（3 行）----------
             RoundPanel card2 = AddCard(y, Sc(144), "番茄钟");
@@ -5495,8 +5555,8 @@ namespace EyeLite
             numSedSeconds = AddRow(cardSed, Sc(FirstRowTop) + Sc(RowHeight) * 2, "活动时长（秒）", 30, 300, cfg.SedentarySeconds);
             y += Sc(144) + Sc(Gap);
 
-            // ---------- 卡片 4：行为（8 行）----------
-            RoundPanel card3 = AddCard(y, Sc(304), "行为");
+            // ---------- 卡片 4：行为（9 行）----------
+            RoundPanel card3 = AddCard(y, Sc(336), "行为");
             chkAllowSkip = AddCheck(card3, Sc(FirstRowTop), "允许跳过 / 推迟休息", cfg.AllowSkip);
             numPostpone = AddRow(card3, Sc(FirstRowTop) + Sc(RowHeight), "推迟时长（分钟）", 1, 60, cfg.PostponeMinutes);
             numIdle = AddRow(card3, Sc(FirstRowTop) + Sc(RowHeight) * 2, "离开多少分钟后暂停计时", 0, 120, cfg.IdleMinutes);
@@ -5515,13 +5575,16 @@ namespace EyeLite
             // 用局部变量而不是字段：没有读取方，留字段只会多一个"永远用不到"的状态位。
             CheckBox chkCamera = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 7, "摄像头计数（暂未开放）", false);
             chkCamera.Enabled = false;
+            // G12：放在最后一行 —— 语气只影响遮罩上的几句话，不动任何行为，
+            // 所以不插在「跳过 / 推迟 / 严格模式」这些真正改变后果的开关中间。
+            AddToneRow(card3, Sc(FirstRowTop) + Sc(RowHeight) * 8);
 
             // ---------- 卡片 5：扩展（插件开关）----------
             // 这张卡是**插件唯一的开关入口**，所以恒定显示（不能按"有没有插件开"来决定显隐，
             // 否则第一次想开的时候根本找不到开关）。
             // 已有四张卡的位置/尺寸一个像素都没动，只是本卡插在它们下面 ——
             // 保存按钮因此下移 Sc(284)，这是新增功能必然要付的版面代价（AutoScroll 兜住小屏）。
-            int extTop = y + Sc(304) + Sc(Gap);
+            int extTop = y + Sc(336) + Sc(Gap);
             RoundPanel cardExt = AddCard(extTop, Sc(268), "扩展");
 
             // 顺序按内存代价从小到大（Stats 几乎零成本 → Guard 只有一个计数器 → 窗口类插件在后）。
@@ -5828,6 +5891,63 @@ namespace EyeLite
         }
 
         /// <summary>
+        /// G12 语气档的一行：左边说明，右边两个互斥的勾选框。
+        ///
+        /// 为什么是**两个**框而不是三个（或一个下拉）：三档里「温和」是默认值，
+        /// 默认值不需要一个能点的控件去表达 ——「两个都不勾」就是它。
+        /// 这样只需要维护一条不变式（两个框不能同时勾），而且用的还是现成的 FlatCheckBox，
+        /// 不必为一行设置项引入自带系统主题边框的 ComboBox（整页剩下的控件都是自绘的）。
+        /// </summary>
+        private void AddToneRow(RoundPanel card, int top)
+        {
+            Label l = new Label();
+            l.Text = "提醒语气（默认温和）";
+            l.Font = Ui.FontRowLabel;
+            l.ForeColor = Ui.LabelText;
+            l.BackColor = Ui.CardBg;
+            l.AutoSize = false;
+            l.TextAlign = ContentAlignment.MiddleLeft;
+            l.SetBounds(Sc(CardPad), top + Sc(4), Sc(152), Sc(24));
+            card.Controls.Add(l);
+
+            chkTonePlain = MakeToneBox(card, Sc(CardPad) + Sc(156), top,
+                                       "冷淡", cfgRef.Tone == 1);
+            chkToneSavage = MakeToneBox(card, Sc(CardPad) + Sc(252), top,
+                                        "毒舌", cfgRef.Tone == 2);
+
+            // 互斥：勾一个就把另一个取消。suppressTone 挡住递归
+            // （取消另一个会触发它自己的 CheckedChanged）。
+            chkTonePlain.CheckedChanged += delegate
+            {
+                if (suppressTone) return;
+                suppressTone = true;
+                if (chkTonePlain.Checked) chkToneSavage.Checked = false;
+                suppressTone = false;
+            };
+            chkToneSavage.CheckedChanged += delegate
+            {
+                if (suppressTone) return;
+                suppressTone = true;
+                if (chkToneSavage.Checked) chkTonePlain.Checked = false;
+                suppressTone = false;
+            };
+        }
+
+        private CheckBox MakeToneBox(RoundPanel card, int left, int top, string text, bool val)
+        {
+            CheckBox c = new FlatCheckBox();
+            c.Text = text;
+            c.Checked = val;
+            c.Font = Ui.FontRowLabel;
+            c.ForeColor = Ui.LabelText;
+            c.BackColor = Ui.CardBg;
+            c.AutoSize = false;
+            c.SetBounds(left, top + Sc(3), Sc(92), Sc(CheckHeight));
+            card.Controls.Add(c);
+            return c;
+        }
+
+        /// <summary>
         /// 只读信息行（统计卡用）。行槽、字号、缩进都与 AddRow 一致，
         /// 所以统计卡和上面的设置卡在视觉上是同一条网格。
         /// </summary>
@@ -6021,6 +6141,8 @@ namespace EyeLite
             cfg.IdleMinutes = (int)numIdle.Value;
             cfg.PreviewSeconds = (int)numPreview.Value;
             cfg.DimAlphaMax = (int)numDim.Value;
+            // G12：两个框都不勾 = 温和（0）。互斥由 AddToneRow 保证，这里不需要再判冲突。
+            cfg.Tone = chkToneSavage.Checked ? 2 : (chkTonePlain.Checked ? 1 : 0);
             cfg.SuppressOnFullscreen = chkSuppressFullscreen.Checked;
             cfg.SoundEnabled = chkSound.Checked;
             cfg.StrictMode = chkStrict.Checked;
@@ -7684,37 +7806,92 @@ namespace EyeLite
         /// false 表示护眼/番茄钟休息，时长取 RestTotalSeconds。
         /// 两条路走的是**同一个**状态机与遮罩，只是时长、文案与配色不同。
         /// </summary>
-        // ---- 「找东西」的提示池 ----
+        // ---- 休息引导语的提示池（G12：三档语气）----
         //
         // 一次给一句、每轮随机，且**不与上一轮重复**（随机但保证变化）。
         // 为什么不用"按轮次索引轮换"：那版实测 3 轮拿到 0/0/1（会跳拍），
         // 没能在合理时间内定位；随机 + 去重 既能保证不重复，也不依赖任何计数器。
         //
         // 文案刻意"不写实"：不指定具体物品的位置，让人真的抬头去找，而不是盯着屏幕想。
-        private static readonly string[] EyeGameHints = new string[]
+        //
+        // **三档必须逐条对齐**（同一句的三种说法，不是三套不相干的句子）：
+        //   这是"语气"不是"内容"——用户换档后应该觉得"同一件事换了个说法"，
+        //   而不是"功能变了"。所以每档都是 8 条，序号一一对应，改一条就三条一起改。
+        //   条数必须相等，否则 EyeGameHint() 的 lastHint 去重会跨档串味。
+        private static readonly string[][] EyeGameHints = new string[][]
         {
-            "让眼睛离开屏幕：看看 6 米外，或在房间里找 3 样蓝色的东西",
-            "找一个你平时没注意过的角落，认真看 5 秒",
-            "数一数房间里有多少样会反光的东西",
-            "找 2 样圆的东西，再把视线放到最远的那面墙上",
-            "看看窗外最远的那栋楼，数一数它有几层",
-            "找一样比手掌小的东西，看清它的边缘",
-            "找一个绿色以外、又不像灰色的东西，看 3 秒",
-            "看看房间里最暗的那个角落，等它变清楚"
+            // 0 温和（默认）：说明 + 轻引导，不带任何评价
+            new string[]
+            {
+                "让眼睛离开屏幕：看看 6 米外，或在房间里找 3 样蓝色的东西",
+                "找一个你平时没注意过的角落，认真看 5 秒",
+                "数一数房间里有多少样会反光的东西",
+                "找 2 样圆的东西，再把视线放到最远的那面墙上",
+                "看看窗外最远的那栋楼，数一数它有几层",
+                "找一样比手掌小的东西，看清它的边缘",
+                "找一个绿色以外、又不像灰色的东西，看 3 秒",
+                "看看房间里最暗的那个角落，等它变清楚"
+            },
+            // 1 冷淡：只说做什么，一句一个动作，不解释
+            new string[]
+            {
+                "看 6 米外，20 秒。或者找 3 样蓝色的东西",
+                "找个没注意过的角落，看 5 秒",
+                "数反光的东西",
+                "找 2 样圆的，然后看最远那面墙",
+                "数窗外最远那栋楼有几层",
+                "找一样比手掌小的，看清边缘",
+                "找一样不是绿也不是灰的，看 3 秒",
+                "看最暗的角落，等它变清楚"
+            },
+            // 2 毒舌：开火对象只能是**行为 / 椅子 / 屏幕 / 这轮状态**，
+            //   绝不能是用户的身体或人格（见 AppConfig.Tone 的两条硬约束）。
+            new string[]
+            {
+                "屏幕不差你这 20 秒。抬头，6 米外，或者找 3 样蓝色的东西",
+                "找个你没注意过的角落看 5 秒——它比这个屏幕有意思",
+                "数数房间里有几样反光的东西。反正你也不会数它的代码行数",
+                "找 2 样圆的，再看最远那面墙。眼睛比进度条重要",
+                "数数窗外最远那栋楼有几层。数不清就说明该歇了",
+                "找一样比手掌小的，看清边缘。别用小字验光",
+                "找一样不是绿也不是灰的看 3 秒。难吧？你的眼睛也在干这事",
+                "看看最暗的角落，等它变清楚。你适应亮度，就是这个过程"
+            }
         };
 
         private static readonly Random eyeGameRnd = new Random();
         private int lastEyeGameHint = -1;
 
+        /// <summary>
+        /// 取一句本档语气的引导语，保证不与上一句重复。
+        /// Tone 越界或对应档为空时退回 0 档 —— 语气是纯装饰，绝不能因此不弹休息。
+        /// </summary>
         private string EyeGameHint()
         {
-            int n = EyeGameHints.Length;
-            if (n <= 1) return EyeGameHints[0];
+            int tier = cfg != null ? cfg.Tone : 0;
+            if (tier < 0 || tier >= EyeGameHints.Length) tier = 0;
+            string[] pool = EyeGameHints[tier];
+            if (pool == null || pool.Length == 0) pool = EyeGameHints[0];
+
+            int n = pool.Length;
+            if (n <= 1) return pool[0];
 
             int pick;
             do { pick = eyeGameRnd.Next(n); } while (pick == lastEyeGameHint);
             lastEyeGameHint = pick;
-            return EyeGameHints[pick];
+            return pool[pick];
+        }
+
+        /// <summary>
+        /// G12：按当前语气档三选一。三档一一对应（同一件事的三种说法）。
+        /// 语气是纯装饰，任何异常都必须退回温和档，不能因为文案把休息卡住。
+        /// </summary>
+        private string ToneText(string gentle, string plain, string savage)
+        {
+            int tier = cfg != null ? cfg.Tone : 0;
+            if (tier == 1) return plain;
+            if (tier == 2) return savage;
+            return gentle;
         }
 
         // ============================================================
@@ -7908,10 +8085,24 @@ namespace EyeLite
 
             // 文案三选一：活动休息 > 番茄钟休息 > 普通护眼。
             // 活动休息**不要求坐满时长、也不判断是否在工位** —— 坐着舒展同样算数。
+            //
+            // G12：两条固定文案也跟着语气档走（三档一一对应，别单独改一档）。
             string eyebrow;
             string hint;
-            if (bodyBreak) { eyebrow = "活动一下"; hint = "起身走两步，或者坐着舒展一下都行"; }
-            else if (cfg.PomodoroEnabled) { eyebrow = "番茄钟休息"; hint = "这一轮专注结束了，起身活动一下"; }
+            if (bodyBreak)
+            {
+                eyebrow = "活动一下";
+                hint = ToneText("起身走两步，或者坐着舒展一下都行",
+                                "起身，走两步",
+                                "起来动一动。椅子又不会跑");
+            }
+            else if (cfg.PomodoroEnabled)
+            {
+                eyebrow = "番茄钟休息";
+                hint = ToneText("这一轮专注结束了，起身活动一下",
+                                "这一轮结束，起身",
+                                "这一轮结束了。下一轮也是这个屏幕，先歇会儿");
+            }
             else
             {
                 eyebrow = "休息一下";
@@ -7921,7 +8112,11 @@ namespace EyeLite
                 // 没能定位。**行为不明的功能不发布** —— 退回一句固定文案，
                 // 用户要求的是"挂到普通护眼休息"，不是"必须轮换"。
                 // 也不做成屏幕上的动画：护眼休息要眼睛离开屏幕，动画等于把视线钉回来。
-                hint = cfg.EyeGameEnabled ? EyeGameHint() : "让眼睛看看 6 米外的东西，放松睫状肌";
+                hint = cfg.EyeGameEnabled
+                     ? EyeGameHint()
+                     : ToneText("让眼睛看看 6 米外的东西，放松睫状肌",
+                                "看 6 米外，20 秒",
+                                "6 米外，20 秒。屏幕不差这 20 秒");
             }
 
             bool pomo = bodyBreak ? false : cfg.PomodoroEnabled;   // 身体休息不用番茄钟配色
@@ -8735,7 +8930,16 @@ namespace EyeLite
         // ---------- A2：渐进式降饱和 ----------
         //
         // 语义：离休息不到 60 秒开始，把屏幕整体（每块屏一层）从 0 线性压到
-        // cfg.DimAlphaMax/100，500ms 一档；任何键鼠输入立刻撤销并放弃本轮。
+        // cfg.DimAlphaMax/100，2000ms 一档；任何键鼠输入立刻撤销并放弃本轮。
+        //
+        // **默认关闭**（AppConfig.DimAlphaMax 的默认值是 0），原因写在 DimTick 的静默窗口那段：
+        // 这个功能会让"60±3 秒到点"这个核心承诺变得不可靠。
+
+        /// <summary>
+        /// 到点前这么长时间内**一帧都不写** Opacity（静默窗口）。
+        /// 5 秒是按"遮罩自己要花的合成时间（实测冷启动可达 1~4 秒）"留的余量。
+        /// </summary>
+        private const int DimQuietMs = 5000;
         //
         // 为什么"输入就放弃本轮"而不是"输入就延后"：
         //   人正在打字时屏幕突然变暗是干扰；而一旦被打断就重新计时的做法，
@@ -8792,14 +8996,25 @@ namespace EyeLite
             }
             dimLastIdleMs = idleMs;
 
+            // ---- 静默窗口：最后 DimQuietMs 秒一帧都不写 ----
+            //
+            // 为什么需要它：每写一次 Form.Opacity，DWM 就要把**整块屏幕**重新合成一次。
+            // 60 秒窗口里原本要写约 45~60 次，正好压在"该弹遮罩"那几秒上 ——
+            // 这是实测出来的**第二个**延迟源（关掉渐暗后方差从 3.97s 塌到 0.86s）。
+            // 最后 5 秒"冻结画面"：不写、也不 hide，把 DWM 的活让给遮罩自己。
+            //   · 不 hide：否则会看到"到点前屏幕突然变亮"，像被取消了；
+            //   · 留着也不碍事：遮罩是不透明的，盖上去就看不见这层了。
+            // **位置必须在"输入就放弃本轮"之后** —— 否则最后 5 秒里用户开始打字，
+            // 屏幕还暗着，而"一有输入就撤"是本功能的前提。
+            if (left <= DimQuietMs) return;
+
             // 两次 Opacity 写入之间的最小间隔。
             //
-            // 为什么从 500ms 放宽到 1000ms、并且再加一道"变化小于 1% 就不写"：
-            //   Opacity 每写一次，DWM 就要把**整块屏幕**重新合成一次。
-            //   双屏 2560x1440 下每秒 2 次写入，实测把 tick 拖到过 63.53s（期望 60s，超出 ±3s 容差）。
-            //   这不是"抖动"，是 UI 线程被合成阻塞。
-            //   放宽后 60 秒窗口内最多约 45 次写入，视觉上仍是连续变暗。
-            int step = (int)((60000L - left) / 1000L);
+            // 三段历史，每次都是同一个方向 —— 减少 DWM 全屏重合成的次数：
+            //   500ms（每轮约 120 次）→ 1000ms（约 45 次，实测把 tick 拖到 63.53s）
+            //   → 2000ms（约 27 次）。双屏 2560x1440 下这个代价是实测到的，不是理论。
+            //   视觉上仍是连续变暗：最大档 45% 分 27 步走完，一步约 1.7% alpha。
+            int step = (int)((60000L - left) / 2000L);
             if (step == dimLastStep) return;
             dimLastStep = step;
 
@@ -8834,8 +9049,8 @@ namespace EyeLite
             // 表现为压暗层再也不出现。所有"不该暗"的分支都会走到这里，所以放这一处即可。
             dimLastAlpha = -1.0;
             // 档位也要归零。理由不是"防不暗"，而是"防延迟半秒"：
-            // 若撤掉时 dimLastStep 还停在 60（窗口末尾的档位），重新进窗口后要等到
-            // 档位再次变化（1000ms 一档）才会写入第一帧 —— 表现为压下后要等最多 1 秒才见暗。
+            // 若撤掉时 dimLastStep 还停在末尾的档位，重新进窗口后要等到
+            // 档位再次变化（2000ms 一档）才会写入第一帧 —— 表现为压下后要等最多 2 秒才见暗。
             // 调用方大多也会自己置 -1，但那依赖每个分支都记得写；放在这里才是不变式。
             dimLastStep = -1;
             if (dimForms == null) return;
@@ -8844,10 +9059,16 @@ namespace EyeLite
             {
                 DimForm f = dimForms[i];
                 if (f == null || f.IsDisposed) continue;
+                // 已经隐藏的层不要再写一次 Opacity。
+                // 为什么要管这个：本方法每 tick 都会被"不该暗"的分支调用，
+                // 而每次写 Opacity 都是一次 DWM 全屏重合成 —— 白白把 UI 线程往合成上送。
+                // 隐藏前一定是先 SetAlpha(0) 再 Hide，所以"不可见"等价于"已经全透明"，
+                // 跳过它不会留下残余的暗层。
+                if (!f.Visible) continue;
                 try
                 {
                     f.SetAlpha(0.0);
-                    if (f.Visible) f.Hide();
+                    f.Hide();
                 }
                 catch { }
             }

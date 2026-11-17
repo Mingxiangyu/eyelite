@@ -29,7 +29,12 @@ CFG_DIR = os.path.join(os.environ.get('APPDATA', ''), 'EyeLite')
 CFG = os.path.join(CFG_DIR, 'config.ini')
 PY = sys.executable
 
-# 每次运行前统一写入的前置（脚本自己会覆盖的，就让它覆盖）
+# 每次运行前统一写入的前置。
+#
+# **叠加而不是覆盖**（2026-11-17 改的）：早先这里是一份固定模板整份写入，
+# 会冲掉调用方想注入的对照变量（改一个变量做 A/B 时，另一个人写的键全被抹平）。
+# 现在先在**用户现有配置**上叠加这组键，再交给被测脚本 ——
+# 这组键永远是"测试要钉住的"，其余键保留用户原值（跑完原字节还原）。
 BASE_CFG = {
     'WorkMinutes': '1',
     'RestSeconds': '8',
@@ -48,7 +53,13 @@ BASE_CFG = {
     'SedentarySeconds': '120',
     'CameraCountEnabled': '0',
     'SuppressOnFullscreen': '1',
-    'DimAlphaMax': '45',
+    # A2 渐暗：**0**，跟产品默认值一致（v1.6.0 起默认关）。
+    # 它会让到点晚 1~3 秒，而 p0a 量的正是"到点准不准"——
+    # 只有 p0a2 需要它开着，那一项自己在 TESTS 里覆盖（见 cfg_extra）。
+    'DimAlphaMax': '0',
+    # 沉浸模式会**一个窗口都不弹**，渗透进来会让整轮全是假 FAIL。
+    'Immersive': '0',
+    'LockCountdownSeconds': '0',
     # P1 新增键：**默认全部关掉**。
     # 理由：C3（前台白名单）/ C4（打字段）都会让遮罩出现时刻偏离 60s，
     # 而 P0 回归量的是核心行为。守卫由 tools/p1-batch1-check.py 单独验证。
@@ -69,6 +80,7 @@ ORDER = ['WorkMinutes', 'RestSeconds', 'PomodoroEnabled', 'PomodoroWork',
          'SedentaryEnabled', 'SedentaryMinutes', 'SedentarySeconds',
          'CameraCountEnabled', 'SuppressOnFullscreen', 'DimAlphaMax',
          'ForegroundGuardEnabled', 'TypingGuardEnabled', 'SittingOptionEnabled',
+         'LockCountdownSeconds', 'Immersive',
          'Plugin_Sound', 'Plugin_EdgeGlow', 'Plugin_Ritual', 'Plugin_Stats',
          'Plugin_Movement', 'Plugin_Guard']
 
@@ -87,6 +99,36 @@ def read_bytes():
             return f.read()
     except Exception:
         return b''
+
+
+def read_cfg_dict():
+    """把现有 config.ini 解析成 dict。
+
+    不用 configparser：它会被值里的 `%` 绊住（BasicInterpolation），
+    而白名单/禁忌词/标题关键词都是自由文本，出现 `%` 只是时间问题。
+    """
+    d = {}
+    try:
+        with open(CFG, 'r', encoding='utf-8-sig') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or line.startswith('['):
+                    continue
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                    d[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return d
+
+
+def build_cfg(extra=None):
+    """用户原配置 + BASE_CFG + 本项额外覆盖。后两者永远赢。"""
+    d = read_cfg_dict()
+    d.update(BASE_CFG)
+    if extra:
+        d.update(extra)
+    return d
 
 
 def write_cfg(d):
@@ -130,6 +172,10 @@ TESTS = [
      # 注入钩子会把压暗层提前到 1 秒，同时编排层又把 config 覆盖成 WorkMinutes=1，
      # 两者叠加会把前提改掉 —— 实测因此产生过一次假 FAIL（单独跑 6/6，编排里 5/6）。
      # 这项本来就是最慢的一项（MEM/GDI 要真等 180s + 380s），压它省不下多少，不值得冒判据失真的风险。
+     #
+     # 注：A2 现在出厂默认关，而这一项的全部 A2 判据都要求渐暗层真的出现 ——
+     # 所以它**自己**在脚本里 per-case 写 DimAlphaMax（MEM 用 0、A2/STEADY 用 45），
+     # 不依赖这里的 BASE_CFG。改那几处之前先看脚本开头的"A2-OFF"用例说明。
      {}),
     ('p0d 空闲计时',        'tools/p0d-idle-check.py', [], {}),      # 断言 58.7s 左右，不压
 ]
@@ -196,7 +242,7 @@ def main():
             print('#' * 72)
 
             stop_eyelite()
-            write_cfg(BASE_CFG)
+            write_cfg(build_cfg())
 
             # 按脚本传环境变量：脚本内部用 os.environ.copy() 起 EyeLite，
             # 只要它没显式清掉这个键就会被继承（各脚本只 pop 自己认识的那几个）。

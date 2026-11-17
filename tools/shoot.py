@@ -246,10 +246,11 @@ def main():
         return d
 
     shots = [
-        # 设置页：780x1302（1.5x 下会更宽，按宽高比认）
-        ('01-settings.png', cfg(WorkMinutes='20', RestSeconds='20', DimAlphaMax='45',
-                                **{'EYE_LITE_OPEN_SETTINGS': '1'}),
-         lambda w, h, tr: (not tr) and w > 700 and h > 800, '设置页', 2.0, True),
+        # 设置页（1.5x 下 812x2044）。用原分辨率存，让浏览器按 README 的 width 缩，
+        # 不要在这里 downscale —— 2 倍整数抽样会吃掉笔画，中文小字直接糊掉。
+        ('settings.png', cfg(WorkMinutes='20', RestSeconds='20', DimAlphaMax='0',
+                             **{'EYE_LITE_OPEN_SETTINGS': '1'}),
+         lambda w, h, tr: (not tr) and w > 700 and h > 800, '设置页', 2.0, True, False, 900),
         # 预告横幅：400x136 逻辑 -> 600x204 物理
         # FAKE_WORK_MS 是"一次性预置累加器"，不是"设定周期"：
         # WorkMinutes=1（上限 60s）预置 52s -> 剩余 8s，正好落进 10s 预告窗，1~2 秒内出横幅
@@ -258,18 +259,33 @@ def main():
         ('02-preview.png', cfg(WorkMinutes='1', PreviewSeconds='10', RestSeconds='20', DimAlphaMax='0'),
          lambda w, h, tr: 430 <= w <= 600 and 140 <= h <= 220, '预告横幅'),
         # 休息遮罩：预置 58s -> 2 秒后到点，遮罩持续 RestSeconds=8s
-        ('03-rest-overlay.png', cfg(WorkMinutes='1', RestSeconds='8', DimAlphaMax='0',
-                                    **{'EYE_LITE_FAKE_WORK_MS': '58000'}),
+        ('rest-overlay.png', cfg(WorkMinutes='1', RestSeconds='8', DimAlphaMax='0',
+                                 **{'EYE_LITE_FAKE_WORK_MS': '58000'}),
          lambda w, h, tr: (not tr) and w >= 1500, '休息遮罩', 0.8, False, True),
-        # 例程窗（素材）
-        ('04-routine-asset.png', cfg(WorkMinutes='20', DimAlphaMax='0',
-                                     **{'EYE_LITE_FAKE_ACTION': '深蹲 10 次'}),
-         lambda w, h, tr: (not tr) and 1000 <= w <= 1150 and 900 <= h <= 1000, '例程·素材'),
-        # 例程窗（自绘）
-        ('05-routine-drawn.png', cfg(WorkMinutes='20', DimAlphaMax='0',
-                                     **{'EYE_LITE_FAKE_ACTION': '肩颈绕环'}),
-         lambda w, h, tr: (not tr) and 1000 <= w <= 1150 and 900 <= h <= 1000, '例程·自绘'),
     ]
+
+    # ---- 9 个动作的演示窗截图 ----
+    #
+    # 这里必须逐个动作跑一遍：`EYE_LITE_FAKE_ACTION=<动作名>` 让程序启动就只播这一个动作，
+    # 否则截图完全靠运气（演示窗按久坐节奏轮换，一次只能拍到一个）。
+    # 文件名/顺序与 README「动作演示」那张表一致，改动作表就同步改这里。
+    # 缩到 640 宽：README 里按 240px 显示，再大只是多占仓库体积。
+    action_shots = [
+        ('action-stand-reach.png', '起身伸展'),
+        ('action-squat.png', '深蹲 10 次'),
+        ('action-arm-circles.png', '肩颈绕环'),
+        ('action-march.png', '原地踏步'),
+        ('action-wall-sit.png', '靠墙静蹲'),
+        ('action-chest-open.png', '扩胸'),
+        ('action-cross-body.png', '单臂横跨胸前'),
+        ('action-lateral-lunge.png', '侧弓步'),
+        ('action-calf-stretch.png', '扶墙小腿拉伸'),
+    ]
+    for name, act in action_shots:
+        shots.append((name, cfg(WorkMinutes='20', DimAlphaMax='0',
+                                **{'EYE_LITE_FAKE_ACTION': act}),
+                      lambda w, h, tr: (not tr) and 1000 <= w <= 1150 and 1150 <= h <= 1250,
+                      act, 0.8, False, False, 640))
 
     only = sys.argv[2] if len(sys.argv) > 2 else ''
     raw = None
@@ -280,20 +296,30 @@ def main():
 
     ok = 0
     n = 0
-    for item in shots:
-        name, env, want, label = item[0], item[1], item[2], item[3]
-        settle = item[4] if len(item) > 4 else 0.4
-        use_screen = bool(item[5]) if len(item) > 5 else False
-        ign_a = bool(item[6]) if len(item) > 6 else False
-        if only and only not in name:
-            continue
-        n += 1
-        path = os.path.join(outdir, name)
-        if shoot(exe, env, path, want, label=label, settle=settle,
-                 screen=use_screen, ignore_alpha=ign_a):
-            ok += 1
-    print('\n完成 %d/%d' % (ok, len(shots)))
-    return 0 if ok == len(shots) else 1
+    try:
+        for item in shots:
+            name, env, want, label = item[0], item[1], item[2], item[3]
+            settle = item[4] if len(item) > 4 else 0.4
+            use_screen = bool(item[5]) if len(item) > 5 else False
+            ign_a = bool(item[6]) if len(item) > 6 else False
+            max_w = item[7] if len(item) > 7 else 1280
+            if only and only not in name:
+                continue
+            n += 1
+            path = os.path.join(outdir, name)
+            if shoot(exe, env, path, want, label=label, settle=settle,
+                     screen=use_screen, ignore_alpha=ign_a, max_w=max_w):
+                ok += 1
+    finally:
+        # 截图必须**原字节还原**用户配置：write_cfg 是整份覆盖，
+        # 跑一轮就把 WorkMinutes/PreviewSeconds 全改掉了（用户会以为设置丢了）。
+        if raw:
+            with open(CFG, 'wb') as f:
+                f.write(raw)
+            print('config restored: %d bytes' % len(raw))
+
+    print('\n完成 %d/%d' % (ok, n))
+    return 0 if ok == n else 1
 
 
 if __name__ == '__main__':

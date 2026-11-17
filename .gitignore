@@ -22,3 +22,8 @@ Thumbs.db
 
 # 打包产物：可重新生成，不入库
 dist/
+
+# 一次性探针：这些脚本自己的 docstring 里就写着"用完即删"，
+# 留着只是为了追溯诊断手法，不该进仓库（结论已经写进 docs/qa/）。
+tools/_probe/
+tools/_m1/

@@ -16,6 +16,37 @@ P0-A / P0-D 真机实测：验证时钟源改造后的计时精度。
 前置：config.ini 里 WorkMinutes=1 / RestSeconds=8 / PomodoroEnabled=0 /
       IdleMinutes=0 / SedentaryEnabled=0，且 EyeLite.exe 已启动。
 
+
+### 3) 休息结束的 δ（durationMs − 配置值）呈"相位锁死"，不是随机
+2026-11-16 十轮 `end.durMs`（配置 8s，`EndRest` 量化修复**尚未编入**该 exe）：
+    9002, 8989, 2554, 8992, 8991, 8990, 8992, 8991, 8991, 8002
+  · 九轮挤在 ~8990（δ≈+990），**只有一轮 8002（δ=+2）**
+  · 若 tick 与休息结束是"随机相位"，应看到 8300/8600/8800 之类的分散值；
+    九轮都贴在 +990 说明 **`restDueMs` 与 tick 网格存在固定相位**，不是均匀分布。
+  · 所以：**等 `EndRest` 搬到 200ms 后，δ 应变成 [0,200] 的均匀分布**。
+    届时若仍看到"九轮 ~190、一轮 ~5"，说明相位锁死只是周期变小、机制还在 ——
+    那时才需要往"两个定时器的相对相位"方向查。
+  · 另：2554ms 那一轮是 δ=−5446（大幅为负），按"δ 不可能为负"的规则，
+    **只能是提前收窗**（用户按了空格/Esc 跳过），不是自然到点。
+
+## 【实测留档 2026-11-16 · 产物 111104/53a9734d】
+
+### 1) 工作计时呈"双峰"，不是随机抖动
+    60.53 / 60.43          ← 簇 A，贴 60.5
+    62.38 / 62.41 / 63.50  ← 簇 B，约 +1.9s
+两簇差 ~1.9s；休息时长五轮都正常（8.91~9.02s）。**5 轮分不出"60% 概率"与"40% 概率"，
+要给它定性请跑 10 轮**（这也是 lead 要求新产物上跑 10 轮的原因）。
+
+### 2) 元凶是 A2 渐暗层（三组只改一个变量，判据一字未改）
+    默认（DimAlphaMax=45、TypingGuard 默认开）
+        60.53 / 62.38 / 63.50 / 60.43 / 62.41   中位 62.38   1/5 超 ±3s   FAIL
+    TypingGuardEnabled=0
+        64.40 / 62.52 / 60.48 / 61.51 / 60.45   中位 61.51   1/5 超 ±3s   FAIL（更差）
+    DimAlphaMax=0（关渐暗）
+        60.52 / 60.54 / 61.38 / 60.55 / 60.51   中位 60.54   0/5 超 ±3s   PASS
+→ 打字段排除；**方差从 3.97s 跨度塌到 0.86s**，是"渐暗就是那个第二延迟源"的强证据。
+→ 结论口径：**判据不动（60±3s 是产品承诺），改产品**；修不好就把 A2 降级为默认关。
+
 **踩坑记录（2026-11-14，新 build）**：A2 的 DimForm（休息前 60 秒渐进压暗）铺满整块
 屏幕，尺寸同样 w>800 h>500，WorkMinutes=1 时启动后 ~1 秒就出现。只按尺寸判遮罩会让
 T1 的"遮罩出现时刻"直接变成 1 秒（计时精度结论全废）。区分依据
@@ -136,13 +167,23 @@ def process_start_time():
 
 
 def wait_for_overlay(timeout_s, poll=0.15):
+    """等遮罩出现。返回 (窗口列表, 等待秒数, idle 统计)。
+
+    idle 统计：{'at_fire': 命中那一刻的空闲毫秒, 'min_3s': 命中前 3 秒内的最小空闲毫秒}
+    空窗判定用得到：at_fire 小 → 用户正在动键鼠（让路会生效，这轮不能算"准时性"样本）。
+    """
     t0 = time.time()
+    samples = []          # [(elapsed_s, idle_ms)]
     while time.time() - t0 < timeout_s:
+        samples.append((time.time() - t0, idle_ms()))
         ov = overlay_windows()
         if ov:
-            return ov, time.time() - t0
+            el = time.time() - t0
+            recent = [i for (t, i) in samples if t >= el - 3.0 and i >= 0]
+            return ov, el, {'at_fire': samples[-1][1] if samples else -1,
+                            'min_3s': min(recent) if recent else -1}
         time.sleep(poll)
-    return [], timeout_s
+    return [], timeout_s, {'at_fire': -1, 'min_3s': -1}
 
 
 def wait_for_no_overlay(timeout_s, poll=0.1):
@@ -184,6 +225,42 @@ def stop_eyelite():
 # 前置配置由脚本**自己写**、跑完按**原始字节**还原。
 # 原来只在 docstring 里写"前置"，直接跑会用用户的真实配置（WorkMinutes=20），
 # 120s 内不可能出遮罩 → 三轮回全都 FAIL，而且看起来像产品缺陷（2026-11-14 实测踩过）。
+
+def idle_ms():
+    """距上次键鼠输入的毫秒（GetLastInputInfo）。用来判断"这一轮有没有人在动键鼠"。
+
+    为什么要采这个：C3/C4 的"临门一脚让路"会被**真实输入**触发，
+    表现为"到点晚 2~3 秒但 T 间隔完全正常"。不采 idle 就会把"用户在场"误判成产品缺陷。
+    """
+    import ctypes
+    import ctypes.wintypes as wt
+
+    class LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [('cbSize', wt.UINT), ('dwTime', wt.DWORD)]
+
+    li = LASTINPUTINFO()
+    li.cbSize = ctypes.sizeof(li)
+    u = ctypes.WinDLL('user32', use_last_error=True)
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    k.GetTickCount.restype = wt.DWORD
+    if not u.GetLastInputInfo(ctypes.byref(li)):
+        return -1
+    return int(k.GetTickCount() - li.dwTime)
+
+
+def exe_sig():
+    """(size, md5)：用来发现"跑到一半 exe 被重新编译"。"""
+    import hashlib
+    exe = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       'EyeLite.exe')
+    try:
+        st = os.stat(exe)
+        with open(exe, 'rb') as f:
+            h = hashlib.md5(f.read()).hexdigest()
+        return (st.st_size, h)
+    except Exception as e:
+        return (-1, 'ERR:%s' % e)
+
 
 CFG_DIR = os.path.join(os.environ.get('APPDATA', ''), 'EyeLite')
 CFG = os.path.join(CFG_DIR, 'config.ini')
@@ -283,9 +360,11 @@ def main():
           'IdleMinutes=0（脚本自备前置，结束按原始字节还原）')
 
     results = []
+    artifact_changed = [False]
     try:
         for rnd in range(1, rounds + 1):
             print('\n=========== 第 %d 轮 ===========' % rnd)
+            sig_before = exe_sig()
             stop_eyelite()
 
             t_launch = time.time()
@@ -301,7 +380,7 @@ def main():
             print('  pid=%d  进程启动时刻基准已取' % pid)
 
             # --- T1/T2：遮罩应在 WorkMinutes(1 分钟) 后弹出 ---
-            ov, waited = wait_for_overlay(120)
+            ov, waited, idle_info = wait_for_overlay(120)
             appear = time.time()
             if not ov:
                 print('  遮罩 120s 内未出现')
@@ -311,6 +390,9 @@ def main():
 
             elapsed = appear - base
             print('  T1/T2 遮罩出现：进程启动后 %.2fs（期望 60s ± 3s）' % elapsed)
+            print('       idle@到点=%sms  最后3s最小=%sms%s'
+                  % (idle_info['at_fire'], idle_info['min_3s'],
+                     '   ← 有输入，C3/C4 让路可能生效' if 0 <= idle_info['min_3s'] < 1000 else ''))
             print('       遮罩窗口 %d 个：%s' %
                   (len(ov), [(w['w'], w['h']) for w in ov]))
             WORK_TIMES.append(elapsed)
@@ -322,6 +404,15 @@ def main():
             gone, dur = wait_for_no_overlay(25)
             print('  T3 遮罩持续 %.2fs 后消失（期望 8s ± 2s）' % dur)
             ok3 = gone and abs(dur - 8.0) <= 2.0
+
+            # 产物在轮内被替换 → 这一轮的数字不可信，丢弃并记录
+            sig_after = exe_sig()
+            if sig_after != sig_before:
+                artifact_changed[0] = True
+                print('  [产物变更] 本轮开始 %s → 结束 %s，本轮结果作废'
+                      % (sig_before[1][:8], sig_after[1][:8]))
+                continue
+
             results.append(('第%d轮 休息时长 %.2fs' % (rnd, dur), ok3, '期望 8±2s'))
     finally:
         stop_eyelite()
@@ -359,6 +450,10 @@ def main():
                                'yes' if DIM_SEEN[0] else 'no',
                                '出现过，但它不是遮罩（TRANSPARENT 且无子窗口）'))
     print('  OVERALL: %s' % ('PASS' if allok else 'FAIL'))
+    if artifact_changed[0]:
+        print('  [警告] 本轮次里有 exe 被替换，已丢弃受影响的轮次；'
+              '整份结论不成立（请用同一产物重跑）')
+        return 2
     return 0 if allok else 1
 
 
