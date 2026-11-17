@@ -251,7 +251,7 @@ namespace EyeLite
         private static extern int GetDeviceCaps(IntPtr hdc, int index);
 
         /// <summary>设置面板上显示的版本号；发布时与 git tag 同步，只改这一处。</summary>
-        public const string AppVersion = "v1.6.3";
+        public const string AppVersion = "v1.6.4";
 
         /// <summary>圆角矩形路径。调用方负责 Dispose。</summary>
         public static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -601,6 +601,119 @@ namespace EyeLite
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
                 TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix |
                 TextFormatFlags.EndEllipsis);
+        }
+    }
+
+    /// <summary>
+    /// 设置页的数值输入框：**单行 TextBox + 自己做范围校验**，不是 NumericUpDown。
+    ///
+    /// 为什么不用 NumericUpDown：
+    ///   1. 它右侧固定带一坨系统主题画的上下小三角，跟这套自绘的扁平圆角不是一路东西
+    ///      （用户原话"上下按钮也别扭，整体很违和"）；
+    ///   2. 那些按钮占掉右侧约 42px（150%），框越窄数字越挤 —— "数字占比奇怪"的另一半原因；
+    ///   3. 想靠 `UpDownButtons.Visible=false` 去掉它**不彻底**：`UpDownBase` 的布局按
+    ///      `upDownButtons.Width` 算编辑框宽度，隐藏子控件不触发重排（`PerformLayout()` 也没用），
+    ///      结果右边留一块 NumericUpDown 自己的白底 —— 用户看到的就是"数字右边一个白色方框"。
+    ///
+    /// 自己画就干净了：没有子按钮、没有内部布局、背景色就是容器的底色。
+    /// 对外暴露 `Value`（int）+ `ValueChanged`，与 NumericUpDown 的用法保持一致，
+    /// 所以 `cfg.X = (int)numX.Value` 这些调用点一个都不用改。
+    /// </summary>
+    internal class NumBox : TextBox
+    {
+        public int MinValue = 0;
+        public int MaxValue = 100;
+
+        private int lastValue = 0;
+
+        public event EventHandler ValueChanged;
+
+        public NumBox()
+        {
+            this.BorderStyle = BorderStyle.None;      // 边框由外面的圆角容器画
+            this.TextAlign = HorizontalAlignment.Center;
+            this.ShortcutsEnabled = false;            // 挡掉 Ctrl+V 粘进一坨非数字
+        }
+
+        public int Value
+        {
+            get
+            {
+                int v;
+                if (!int.TryParse(this.Text.Trim(), out v)) return lastValue;
+                if (v < MinValue) v = MinValue;
+                if (v > MaxValue) v = MaxValue;
+                return v;
+            }
+            set
+            {
+                int v = value;
+                if (v < MinValue) v = MinValue;
+                if (v > MaxValue) v = MaxValue;
+                lastValue = v;
+                this.Text = v.ToString();
+            }
+        }
+
+        /// <summary>只放行数字与控制键（退格/删除）；字母、负号、小数点一律挡掉。</summary>
+        protected override void OnKeyPress(KeyPressEventArgs e)
+        {
+            if (!char.IsControl(e.KeyChar) && !char.IsDigit(e.KeyChar))
+            {
+                e.Handled = true;
+                return;
+            }
+            base.OnKeyPress(e);
+        }
+
+        protected override void OnTextChanged(EventArgs e)
+        {
+            base.OnTextChanged(e);
+
+            // 输入过程中**不强行夹到下限**：否则想输 "20" 时打完 "2" 就被改成下限（比如 5）。
+            // 只处理"已经超上限"这一种（多打了一位），截断并保持光标在末尾。
+            int v;
+            if (int.TryParse(this.Text.Trim(), out v) && v > MaxValue)
+            {
+                this.Text = MaxValue.ToString();
+                this.SelectionStart = this.Text.Length;
+                v = MaxValue;
+            }
+            if (int.TryParse(this.Text.Trim(), out v)) lastValue = v;
+
+            if (ValueChanged != null) ValueChanged(this, EventArgs.Empty);
+        }
+
+        /// <summary>失焦时统一夹到 [Min,Max] 并把内容规整（空串、"007" 这类都收掉）。</summary>
+        protected override void OnLeave(EventArgs e)
+        {
+            Commit();
+            base.OnLeave(e);
+        }
+
+        /// <summary>
+        /// 回车只做提交，不冒泡成对话框的默认按钮。
+        /// 不拦的话：在"工作时长"里敲回车 = 直接触发「保存」并关掉整个设置页。
+        /// </summary>
+        protected override bool ProcessDialogKey(Keys keyData)
+        {
+            if (keyData == Keys.Enter)
+            {
+                Commit();
+                return true;
+            }
+            return base.ProcessDialogKey(keyData);
+        }
+
+        private void Commit()
+        {
+            int v;
+            if (!int.TryParse(this.Text.Trim(), out v)) v = lastValue;
+            if (v < MinValue) v = MinValue;
+            if (v > MaxValue) v = MaxValue;
+            lastValue = v;
+            string t = v.ToString();
+            if (this.Text != t) this.Text = t;
         }
     }
 
@@ -5630,8 +5743,10 @@ namespace EyeLite
     // ================================================================
     internal class SettingsForm : Form
     {
-        private NumericUpDown numWork, numRest, numPomoWork, numPomoRest,
-                              numSedMinutes, numSedSeconds, numPostpone, numIdle, numPreview, numDim;
+        // NumBox = 自绘的单行文本框（见类注释）。对外仍有 Value / ValueChanged，
+        // 所以下面所有 `cfg.X = (int)numX.Value` 的调用点都不用动。
+        private NumBox numWork, numRest, numPomoWork, numPomoRest,
+                       numSedMinutes, numSedSeconds, numPostpone, numIdle, numPreview, numDim;
         private CheckBox chkPomodoro, chkSedentary, chkAllowSkip, chkSound, chkStrict, chkAutoStart,
                           chkSuppressFullscreen;
 
@@ -5691,9 +5806,8 @@ namespace EyeLite
         //   去掉箭头之后整块宽度都归数字，42 就是"三位数（120/180）居中刚好、
         //   两侧各留 ~16px"的宽度 —— 再窄三位数就要贴边了。
         private const int NumWidth = 42;
-        // 26 是"15pt 粗体还不裁字"能用的高度：150% 下行高约 40px，控件 26×1.5=39px。
-        // 再想放大就得动 RowHeight，而 RowHeight 一动 9 行卡片全部重排、整页高度重算。
-        private const int NumHeight = 26;
+        // 注：数值框的高度不再写常量 —— 换成 NumBox（单行 TextBox）之后高度由字号决定，
+        // 布局时用 PreferredHeight 反算垂直居中的位置（见 AddRow）。
         private const int Gap = 12;
 
         // DPI 缩放因子（1.0 = 96dpi）。字体是 pt 会随 DPI 放大，盒子必须同比放大，
@@ -5981,6 +6095,14 @@ namespace EyeLite
             this.AcceptButton = ok;
             this.CancelButton = cancel;
 
+            // 打开设置页时第一个输入框会自动获得焦点，而 TextBox 首次聚焦会**整段全选** ——
+            // 表现就是"刚打开设置，工作时长那一格是蓝底白字"，看着像被高亮标记了。
+            // 这里把选区收回到光标位置：焦点仍在（用户可以直接打字），但不再满格反色。
+            this.Shown += delegate
+            {
+                try { numWork.Select(numWork.Text.Length, 0); } catch { }
+            };
+
             // 真正的滚动范围在这里才定得下来：内容总高 = 保存按钮底边 + 底部留白。
             // 宽度传 0 = 水平范围跟随客户区（见构造函数开头 AutoScroll 处的原因）。
             this.AutoScrollMinSize = new Size(0, btnY + Sc(38) + Sc(14));
@@ -6143,7 +6265,7 @@ namespace EyeLite
             return card;
         }
 
-        private NumericUpDown AddRow(RoundPanel card, int top, string text, int min, int max, int val)
+        private NumBox AddRow(RoundPanel card, int top, string text, int min, int max, int val)
         {
             Label l = new Label();
             l.Text = text;
@@ -6178,11 +6300,12 @@ namespace EyeLite
             box.SetBounds(numRight - boxW, top + Sc(2), boxW, boxH);
             card.Controls.Add(box);
 
-            NumericUpDown n = new NumericUpDown();
-            n.Minimum = min;
-            n.Maximum = max;
-            n.Value = val;
+            NumBox n = new NumBox();
+            n.MinValue = min;
+            n.MaxValue = max;
             n.Font = Ui.FontNumInput;     // 比标签大一号，见 FontNumInput 的注释
+            n.ForeColor = Ui.TitleText;   // 深色，和标题同档，比 LabelText 更"是数据"
+            n.Value = val;
             n.BorderStyle = BorderStyle.None;
             // **居中**。右对齐会让数字贴着框的右边缘、左边留一大片空白；
             // 箭头去掉之后编辑框是整块宽度，居中才是真正的居中（两侧留白对称）。
@@ -6192,17 +6315,12 @@ namespace EyeLite
             // UpDownButtons 在控件右侧固定吃掉约 28px（150% 下 42px），
             // 所以框越窄、留给数字的宽度反而越小 —— 收窄框宽根本救不了占比。
             // 去掉之后整块宽度都给数字，居中就真的居中了。
-            // 代价：鼠标不能点箭头加减；但滚轮、直接输入、Tab 都还在，设置页这种低频操作够用。
-            // 试过"隐藏上下箭头让数字占满"，**行不通**：UpDownBase 按 upDownButtons.Width
-            // 算编辑框宽度，隐藏子控件不触发重排（PerformLayout 也无效），
-            // 结果是文字只在左边 68px 里居中、右边留一条空（实测偏左 16px）。
-            // 真正有效的做法见 NumWidth 的注释：把框收到"数字区 + 箭头"刚好放得下。
             n.BackColor = Ui.InputBg;
-            n.AutoSize = false;
-            int numH = Sc(NumHeight);
-            // x 只有左内边距 Sc(6)；y 只在容器内居中，**不再加 top**（父容器已带 top）
-            n.SetBounds(0, (boxH - numH) / 2, boxW, numH);   // 占满容器，左右各留圆角描边的位置
-            HideSpinButtons(n);
+            // **高度交给字体**：单行 TextBox 的高度由字号决定（SetBounds 给的高度会被忽略），
+            // 拿 PreferredHeight 反过来算垂直居中的位置 —— 数字才真正落在框的中间，
+            // 而不是被一个写死的高度顶偏上/偏下（用户反馈"数字上下没有居中"就是后者）。
+            int numH = n.PreferredHeight;
+            n.SetBounds(0, (boxH - numH) / 2, boxW, numH);   // 横向占满容器，让数字居中到框的正中
 
             // 焦点反馈：输入框没有自己的边框，只能用容器的描边色表达"这个框被选中了"。
             // 用 PrimaryBg(#1F2937) 而不是 Accent(#5FD3A6)：薄荷绿在白卡片上对比太低，
@@ -6220,51 +6338,6 @@ namespace EyeLite
 
             box.Controls.Add(n);
             return n;
-        }
-
-        /// <summary>
-        /// 去掉数值框右侧的上下小箭头，并让内部编辑框占满整块宽度。
-        ///
-        /// 为什么要去掉：那是 WinForms 原生的 `UpDownButtons`，系统主题画的小三角形，
-        /// 跟这套自绘的扁平圆角完全不搭 —— 用户原话「上下按钮也别扭，整体很违和」。
-        ///
-        /// 为什么不能只设 `Visible = false`：`UpDownBase` 的布局是按
-        /// `upDownButtons.Width` 算编辑框宽度的，隐藏子控件**不触发重排**
-        /// （`PerformLayout()` 也不管用，实测文字仍只在左侧 68px 里居中、右边空一条）。
-        /// 所以这里做两件事：隐藏按钮 + 手动把另一个子控件（编辑框）撑满，
-        /// 并挂到 SizeChanged 上，防止后续任何一次布局把它缩回去。
-        ///
-        /// 代价：鼠标不能点箭头加减。滚轮、直接输入、Tab 都还在，设置页这种低频输入够用。
-        /// </summary>
-        private static void HideSpinButtons(NumericUpDown n)
-        {
-            for (int i = 0; i < n.Controls.Count; i++)
-            {
-                Control c = n.Controls[i];
-                if (c == null) continue;
-                if (c.GetType().Name == "UpDownButtons")
-                {
-                    c.Visible = false;
-                }
-                else
-                {
-                    c.Dock = DockStyle.Fill;
-                }
-            }
-
-            // 兜底：WinForms 在 SizeChanged 时会重排一次，可能把编辑框按按钮宽度缩回去。
-            n.SizeChanged += delegate
-            {
-                for (int i = 0; i < n.Controls.Count; i++)
-                {
-                    Control c = n.Controls[i];
-                    if (c == null || c.GetType().Name == "UpDownButtons") continue;
-                    if (c.Dock != DockStyle.Fill) c.Dock = DockStyle.Fill;
-                    int w = n.ClientSize.Width;
-                    int h = n.ClientSize.Height;
-                    if (w > 0 && (c.Width != w || c.Height != h)) c.Bounds = new Rectangle(0, 0, w, h);
-                }
-            };
         }
 
         private CheckBox AddCheck(RoundPanel card, int top, string text, bool val)
@@ -6560,6 +6633,7 @@ namespace EyeLite
         private ToolStripMenuItem miAutoStart;
         private ToolStripMenuItem miPomodoro;      // 需要能被双击路径同步勾选状态
         private ToolStripMenuItem miRoutineAuto;   // 「缓解一下 → 自动跟练」的勾选状态
+        private ToolStripMenuItem miPlugins;       // 「扩展」子菜单（勾选状态要能整体同步）
 
         // 模式切换提示卡（进入/退出番茄钟时弹一下）。懒创建：没切过模式就一个对象都不建。
         private ModeToastForm modeToast;
@@ -7003,7 +7077,7 @@ namespace EyeLite
 
             // 托盘里也能开关插件。设置页「扩展」卡要点开设置才能改，而插件是"试一下"的东西，
             // 从托盘勾更快。走同一条 PluginHost.SetOn + cfg.Save 路径，失败回滚（见 TogglePluginFromTray）。
-            ToolStripMenuItem miPlugins = new ToolStripMenuItem("扩展");
+            miPlugins = new ToolStripMenuItem("扩展");
             for (int pi = 0; pi < PluginHost.All.Count; pi++)
             {
                 PluginDescriptor pd = PluginHost.All[pi];
@@ -7011,6 +7085,7 @@ namespace EyeLite
                 ToolStripMenuItem item = new ToolStripMenuItem(pd.DisplayName);
                 item.CheckOnClick = true;
                 item.Checked = PluginHost.IsOn(pd.Id);
+                item.Tag = pd.Id;                      // 供 SyncTrayMenuChecks 反查插件状态
                 string pluginId = pd.Id;               // 闭包：必须捕获值，不能捕获循环体里的引用
                 ToolStripMenuItem self = item;
                 item.Click += delegate { TogglePluginFromTray(pluginId, self); };
@@ -7069,6 +7144,13 @@ namespace EyeLite
             menu.Items.Add(miExit);
 
             tray.ContextMenuStrip = menu;
+
+            // **每次弹出前把勾选状态与配置对齐**。
+            // 菜单是在启动时构建一次的，而状态会在别处变：
+            // 设置页保存、双击托盘切番茄钟、快捷键……以前只同步了「开机自启」一项，
+            // 于是出现"设置里勾了、托盘菜单没勾"（用户截图反馈的就是这个）。
+            // 挂在 Opening 上是一劳永逸的：不管谁改的，下次打开菜单一定是对的。
+            menu.Opening += delegate { SyncTrayMenuChecks(); };
             // 双击托盘 = 进入 / 退出番茄钟模式（对齐 ProjectEye 的手感）。
             //
             // 以前这里是"立即休息"。用户反馈：想休息直接站起来就行，双击弹一个
@@ -9266,6 +9348,38 @@ namespace EyeLite
             catch { }
         }
 
+        /// <summary>
+        /// 把托盘菜单上的所有勾选/文案与运行时状态对齐。
+        ///
+        /// 为什么需要：菜单只在启动时构建一次，而状态会在设置页、双击托盘、插件回调里变。
+        /// 早先只同步了「开机自启」，结果「扩展」里明明勾着、托盘菜单却是空的 ——
+        /// 用户会以为插件没生效。**这类"同一个状态两个地方显示不同"比功能缺失更伤信任。**
+        /// </summary>
+        private void SyncTrayMenuChecks()
+        {
+            try
+            {
+                if (miPause != null) miPause.Text = paused ? "恢复计时" : "暂停计时";
+                if (miPomodoro != null) miPomodoro.Checked = cfg.PomodoroEnabled;
+                if (miImmersive != null) miImmersive.Checked = cfg.Immersive;
+                if (miRoutineAuto != null) miRoutineAuto.Checked = cfg.RoutineAuto;
+                if (miAutoStart != null) miAutoStart.Checked = cfg.StartWithWindows;
+
+                if (miPlugins != null)
+                {
+                    for (int i = 0; i < miPlugins.DropDownItems.Count; i++)
+                    {
+                        ToolStripMenuItem it = miPlugins.DropDownItems[i] as ToolStripMenuItem;
+                        if (it == null) continue;
+                        string id = it.Tag as string;
+                        if (id == null || id.Length == 0) continue;
+                        it.Checked = PluginHost.IsOn(id);
+                    }
+                }
+            }
+            catch { }
+        }
+
         private void ShowSettings()
         {
             using (SettingsForm f = new SettingsForm(cfg))
@@ -9274,7 +9388,7 @@ namespace EyeLite
                 {
                     cfg.Save();
                     EnsureAutoStartRegistered(cfg.StartWithWindows);
-                    miAutoStart.Checked = cfg.StartWithWindows;
+                    SyncTrayMenuChecks();     // 一次性把所有菜单项拉正，不再一项一项补
 
                     // 参数变了，下次休息前重建窗体（按钮文案/是否可跳过会变）
                     screenSignature = "";

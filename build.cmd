@@ -106,7 +106,23 @@ set "RES=%RES% /resource:assets\moves\lateral-lunge\frame2.png,EyeLite.res.later
 set "RES=%RES% /resource:assets\moves\lateral-lunge\frame3.png,EyeLite.res.lateral-lunge.3"
 set "RES=%RES% /resource:assets\ATTRIBUTION.md,EyeLite.res.ATTRIBUTION.md"
 
-"%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ /debug- /codepage:65001 /out:"%OUT%" /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll "src\Program.cs" %RES%
+rem --- exe icon ---
+rem /win32icon embeds assets\app.ico as the FILE icon (taskbar / Explorer / Alt+Tab).
+rem This is NOT the tray icon: tray.Icon is drawn at runtime (the progress ring),
+rem while the file icon must exist at compile time. Without it Windows shows the
+rem default blank .NET icon in the taskbar - that was the user-reported "no logo".
+rem Regenerate with: python tools\make-icon.py
+if not exist "assets\app.ico" goto NOICON
+set "ICONOPT=/win32icon:assets\app.ico"
+goto HAVEICON
+:NOICON
+rem Missing icon is NOT fatal: build a usable exe, just without a taskbar logo.
+echo [WARN] assets\app.ico not found - building without a file icon.
+echo        Run: python tools\make-icon.py
+set "ICONOPT="
+:HAVEICON
+
+"%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ /debug- /codepage:65001 %ICONOPT% /out:"%OUT%" /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll "src\Program.cs" %RES%
 
 if errorlevel 1 goto FAIL
 
