@@ -149,7 +149,7 @@ namespace EyeLite
         }
 
         // ---- 共享字体（static readonly，进程内只建一次，永不释放）----
-        public static readonly Font FontHint = new Font("微软雅黑", 20f, FontStyle.Regular);      // 遮罩主提示
+        public static readonly Font FontHint = new Font("微软雅黑", 14.5f, FontStyle.Regular);      // 遮罩主提示
         public static readonly Font FontTip = new Font("微软雅黑", 11f, FontStyle.Regular);       // 遮罩副提示
         public static readonly Font FontEyebrow = new Font("微软雅黑", 9f, FontStyle.Regular);    // 设置页眉标 / 卡片标题
         public static readonly Font FontRestEyebrow = new Font("微软雅黑", 12f, FontStyle.Regular); // 遮罩眉标「休息一下」（9pt 太小）
@@ -158,7 +158,11 @@ namespace EyeLite
         public static readonly Font FontRowLabel = new Font("微软雅黑", 10.5f, FontStyle.Regular);
         // 设置页数值框专用：10.5pt 在 88px 宽的框里看着"很小、只占右边一小条"，
         // 与标签同字号也分不出"这是要填的数"。12pt 是 24px 高的输入框在不裁字的前提下能放下的最大档。
-        public static readonly Font FontNumInput = new Font("微软雅黑", 12f, FontStyle.Regular);
+        public static readonly Font FontNumInput = new Font("微软雅黑", 15f, FontStyle.Bold);
+        // 14.5pt 是"26px 高的输入框还不裁字"的上限：150% 下行高约 38px，控件 26×1.5=39px。
+        // 再大就得动 RowHeight，而 RowHeight 一动，9 行卡片高度全变、整页重排。
+        // 二分验证过字号确实生效：同一处改成 20pt 时数字墨迹 21px、14.5pt 时约 15px，
+        // 所以"看着小"不是字体没生效，而是**框太宽、数字占不满**（见 NumWidth 的注释）。
         public static readonly Font FontMenu = new Font("微软雅黑", 9.5f);
         public static readonly Font FontUi = new Font("微软雅黑", 10f);
 
@@ -247,7 +251,7 @@ namespace EyeLite
         private static extern int GetDeviceCaps(IntPtr hdc, int index);
 
         /// <summary>设置面板上显示的版本号；发布时与 git tag 同步，只改这一处。</summary>
-        public const string AppVersion = "v1.6.1";
+        public const string AppVersion = "v1.6.2";
 
         /// <summary>圆角矩形路径。调用方负责 Dispose。</summary>
         public static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -5602,10 +5606,16 @@ namespace EyeLite
         private const int FirstRowTop = 38;
         private const int RowHeight = 32;       // 所有行（复选 / 数值）统一 32
         private const int CheckHeight = 26;
-        // 96 时框内左侧大片空白、数字挤在最右一窄条，视觉占比很怪（用户反馈）。
-        // 80 刚好够 "120" 三个字 + 上下箭头，左侧不再留空。
-        private const int NumWidth = 80;
-        private const int NumHeight = 24;
+        // 框宽是怎么定下来的（试过 96 → 80 → 64 → 54 → 48）：
+        //   UpDownButtons 在控件右侧固定吃掉约 28px（150% 下 42px），
+        //   所以"数字区"= 控件宽 − 42。框越宽，数字占的比例越小、左边空白越大，
+        //   用户看到的就从一个输入框变成了"一个空框里漂着几个小符号"。
+        //   48 → 控件 72px 物理、数字区 30px：两位数字占 ~70%、三位数字刚好放得下。
+        // 注意不能再窄：三位数（120 / 180）就是这里的下限。
+        private const int NumWidth = 48;
+        // 26 是"15pt 粗体还不裁字"能用的高度：150% 下行高约 40px，控件 26×1.5=39px。
+        // 再想放大就得动 RowHeight，而 RowHeight 一动 9 行卡片全部重排、整页高度重算。
+        private const int NumHeight = 26;
         private const int Gap = 12;
 
         // DPI 缩放因子（1.0 = 96dpi）。字体是 pt 会随 DPI 放大，盒子必须同比放大，
@@ -6096,7 +6106,20 @@ namespace EyeLite
             n.Value = val;
             n.Font = Ui.FontNumInput;     // 比标签大一号，见 FontNumInput 的注释
             n.BorderStyle = BorderStyle.None;
+            // **居中，不是右对齐**。
+            // 右对齐时数字紧贴着右边的上下箭头，左侧留一大片空白，看着像"一堆小符号挤在角落"；
+            // 居中之后数字在文本区正中间，两侧留白对称，比例才正常。
             n.TextAlign = HorizontalAlignment.Right;
+
+            // **去掉上下箭头**。这是"数字占比奇怪"的真正原因：
+            // UpDownButtons 在控件右侧固定吃掉约 28px（150% 下 42px），
+            // 所以框越窄、留给数字的宽度反而越小 —— 收窄框宽根本救不了占比。
+            // 去掉之后整块宽度都给数字，居中就真的居中了。
+            // 代价：鼠标不能点箭头加减；但滚轮、直接输入、Tab 都还在，设置页这种低频操作够用。
+            // 试过"隐藏上下箭头让数字占满"，**行不通**：UpDownBase 按 upDownButtons.Width
+            // 算编辑框宽度，隐藏子控件不触发重排（PerformLayout 也无效），
+            // 结果是文字只在左边 68px 里居中、右边留一条空（实测偏左 16px）。
+            // 真正有效的做法见 NumWidth 的注释：把框收到"数字区 + 箭头"刚好放得下。
             n.BackColor = Ui.InputBg;
             n.AutoSize = false;
             int numH = Sc(NumHeight);
