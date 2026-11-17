@@ -4304,6 +4304,15 @@ namespace EyeLite
         // 不用随机：随机会连着两次都给同一个部位，而"每个部位都轮到"才是有意义的覆盖。
         public int RoutineIndex = 0;
 
+        // ---- 边缘微光要不要每轮都亮 ----
+        //
+        // 用户反馈："为什么还一直出现，提示一次就行了。"
+        // 光带的设计意图是"休息前 60 秒的余光提示"，但它每轮都亮 ——
+        // 一天十几次，从"提示"变成了"噪音"。
+        // 默认只亮第一次，之后不再出现；`GlowShownCount` 落盘，重启也不重置。
+        public bool GlowOnce = true;
+        public int GlowShownCount = 0;
+
         // ---- E1 跳过配额（插件 Guard；Plugin_Guard=0 时这套逻辑完全不生效）----
         //
         // 为什么要有它：跳过是"我这次不休息"的自我谈判，一次两次是合理的，
@@ -4420,6 +4429,8 @@ namespace EyeLite
                         case "RoutineEveryN": c.RoutineEveryN = Clamp(v, 3, 1, 20); break;
                         case "RoutineRestCount": c.RoutineRestCount = Clamp(v, 0, 0, 100000000); break;
                         case "RoutineIndex": c.RoutineIndex = Clamp(v, 0, 0, 1000); break;
+                        case "GlowOnce": c.GlowOnce = v == "1"; break;
+                        case "GlowShownCount": c.GlowShownCount = Clamp(v, 0, 0, 1000000); break;
                         case "SkipQuotaPerDay": c.SkipQuotaPerDay = Clamp(v, 3, 0, 100); break;
                         case "SkipQuotaDate": c.SkipQuotaDate = v; break;
                         case "SkipQuotaUsed": c.SkipQuotaUsed = Clamp(v, 0, 0, 100); break;
@@ -4491,6 +4502,8 @@ namespace EyeLite
                 sb.AppendLine("RoutineEveryN=" + RoutineEveryN);
                 sb.AppendLine("RoutineRestCount=" + RoutineRestCount);
                 sb.AppendLine("RoutineIndex=" + RoutineIndex);
+                sb.AppendLine("GlowOnce=" + (GlowOnce ? "1" : "0"));
+                sb.AppendLine("GlowShownCount=" + GlowShownCount);
                 sb.AppendLine("SkipQuotaPerDay=" + SkipQuotaPerDay);
                 sb.AppendLine("SkipQuotaDate=" + SkipQuotaDate);
                 sb.AppendLine("SkipQuotaUsed=" + SkipQuotaUsed);
@@ -8140,7 +8153,23 @@ namespace EyeLite
         {
             EdgeGlowPlugin p = PluginHost.Get("EdgeGlow") as EdgeGlowPlugin;
             if (p == null) return;
-            p.SetWindow(GlowWindowOpen());
+
+            bool open = GlowWindowOpen();
+
+            // "只提示一次"：光带本来每轮休息前都亮，一天十几次，从"余光提示"变成噪音
+            // （用户原话："为什么还一直出现，提示一次就行了"）。
+            // 计数落盘，重启不重置 —— 否则每开一次机就又被提示一轮。
+            if (open && cfg.GlowOnce)
+            {
+                if (cfg.GlowShownCount >= 1) open = false;
+                else
+                {
+                    cfg.GlowShownCount = 1;
+                    cfg.Save();
+                }
+            }
+
+            p.SetWindow(open);
         }
 
         private void HideEdgeGlow()
