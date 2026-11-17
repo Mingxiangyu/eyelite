@@ -23,7 +23,8 @@ P3-B 真机实验：倒计时卡顿 A/B（托盘 tooltip / 进度环是不是把
 
 ## 纪律
 · config.ini 按原始字节备份/还原；trace 文件只写 `tools/_probe/`，结束删除
-· 启动前清空所有 `EYE_LITE_*` 钩子；每档开始前 taskkill；结束也 taskkill
+· 启动前清空所有 `EYE_LITE_*` 钩子；结束只 `taskkill /PID` 杀**本脚本自己起的**实例
+  （不用 `/im`：那会连别人的实例一起杀。若检测到外部实例占用单实例互斥，本档会失败而非误判）
 · 不抢前台、不动鼠标（本实验完全不注入输入）
 
 ## 用法
@@ -165,7 +166,10 @@ def eyelite_pids():
 
 
 def stop_eyelite():
-    subprocess.run(['taskkill', '/im', 'EyeLite.exe', '/f'], capture_output=True)
+    """只杀本脚本自己启动的实例；不用 `taskkill /im`（会连别人的一起杀）。"""
+    subprocess.run(['taskkill', '/PID', str(_own_pid[0]), '/f'],
+                   capture_output=True) if _own_pid[0] else None
+    return True
     t0 = time.time()
     while time.time() - t0 < 12:
         if not eyelite_pids():
@@ -174,14 +178,19 @@ def stop_eyelite():
     return False
 
 
+_own_pid = [None]
+
+
 def launch(env_extra):
     env = os.environ.copy()
     for k in list(env.keys()):
         if k.startswith('EYE_LITE_'):
             env.pop(k, None)
     env.update(env_extra)
-    return subprocess.Popen([EXE], cwd=ROOT, env=env,
+    proc = subprocess.Popen([EXE], cwd=ROOT, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _own_pid[0] = proc.pid
+    return proc
 
 
 def parse_trace(path):
@@ -236,7 +245,10 @@ def main():
     if not os.path.exists(EXE):
         print('FAIL: EyeLite.exe not found')
         return 2
-    print('被测产物: %s (%d bytes)' % (EXE, os.path.getsize(EXE)))
+    import hashlib
+    print('被测产物: %s (%d bytes) md5=%s'
+          % (EXE, os.path.getsize(EXE),
+             hashlib.md5(open(EXE, 'rb').read()).hexdigest()))
 
     args = [a.strip() for a in sys.argv[1:]]
     b2 = 'b2' in args                     # B2：30 秒预告 + **开着渐暗**（贴近用户真实配置）

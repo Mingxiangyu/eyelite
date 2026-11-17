@@ -248,11 +248,35 @@ def idle_ms():
     return int(k.GetTickCount() - li.dwTime)
 
 
+def _src_newer_than_exe_warning():
+    """exe 是否比 src 旧 —— 只看 git status 不够，产物可能是旧源码编出来的。"""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        t_src = os.path.getmtime(os.path.join(root, 'src', 'Program.cs'))
+        t_exe = os.path.getmtime(os.path.join(root, 'EyeLite.exe'))
+    except Exception:
+        return None
+    if t_exe <= t_src:
+        return ('[警告] exe mtime(%d) <= src mtime(%d)：产物可能不含当前源码，'
+                '结论只能对应"这个 exe"，不要写成"当前源码已通过"'
+                % (t_exe, t_src))
+    return None
+
+
 def exe_sig():
     """(size, md5)：用来发现"跑到一半 exe 被重新编译"。"""
     import hashlib
     exe = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        'EyeLite.exe')
+
+    # 产物是否包含当前源码：只看 git status 不够 —— exe 可能早于 src（SE 2026-11-17 提醒）。
+    _w = _src_newer_than_exe_warning()
+    if _w:
+        print(_w)
+    print('被测 exe: %s  size=%d  md5=%s'
+          % (os.path.basename(exe), os.path.getsize(exe),
+             __import__('hashlib').md5(open(exe, 'rb').read()).hexdigest()))
     try:
         st = os.stat(exe)
         with open(exe, 'rb') as f:

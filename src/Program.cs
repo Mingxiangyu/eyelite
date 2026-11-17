@@ -244,7 +244,7 @@ namespace EyeLite
         private static extern int GetDeviceCaps(IntPtr hdc, int index);
 
         /// <summary>设置面板上显示的版本号；发布时与 git tag 同步，只改这一处。</summary>
-        public const string AppVersion = "v1.6.0";
+        public const string AppVersion = "v1.6.1";
 
         /// <summary>圆角矩形路径。调用方负责 Dispose。</summary>
         public static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -280,7 +280,9 @@ namespace EyeLite
     internal class RoundPanel : Panel
     {
         private readonly int radius;
-        private readonly Pen borderPen;
+        // 不设 readonly：输入框容器要靠换边框色表达"当前被聚焦"，
+        // 而输入框本身是 BorderStyle.None，没有别的地方能承载焦点态。
+        private Pen borderPen;
         private GraphicsPath path;
         private Size pathSize = Size.Empty;
 
@@ -335,6 +337,19 @@ namespace EyeLite
             if (path == null) return;
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             e.Graphics.DrawPath(borderPen, path);
+        }
+
+        /// <summary>
+        /// 运行时换边框色（输入框聚焦高亮）。语义与 RoundButton.SetBorderColor 一致：
+        /// 颜色没变就直接返回，避免每次 Enter/Leave 都新建一个 Pen。
+        /// </summary>
+        public void SetBorderColor(Color c)
+        {
+            if (borderPen == null || borderPen.Color == c) return;
+            Pen old = borderPen;
+            borderPen = new Pen(c, old.Width);
+            old.Dispose();
+            this.Invalidate();
         }
 
         protected override void Dispose(bool disposing)
@@ -419,6 +434,8 @@ namespace EyeLite
         protected override void OnMouseEnter(EventArgs e)
         {
             base.OnMouseEnter(e);
+            // 禁用态不该有 hover 反馈：否则鼠标划过仍然变色，看起来像可用、点了却没反应
+            if (!this.Enabled) return;
             this.BackColor = hoverBack;
         }
 
@@ -440,6 +457,7 @@ namespace EyeLite
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
+            if (!this.Enabled) return;
             this.BackColor = normalBack;
         }
 
@@ -452,10 +470,20 @@ namespace EyeLite
             g.SmoothingMode = SmoothingMode.AntiAlias;
             if (borderPen != null) g.DrawPath(borderPen, path);
 
-            // Enabled=false 时必须**看得见**地变灰：自绘控件不会被系统主题接管，
-            // 不处理就会出现"按钮看起来正常、点下去没反应"（E1 跳过配额用完时正是这个场景）。
-            // GDI 文本不吃 alpha，所以要给一个真正的暗色，而不是 FromArgb(半透明)。
-            Color fore = this.Enabled ? this.ForeColor : ControlPaint.Dark(this.ForeColor, 0.45f);
+            // 禁用态必须**比可用态更淡**，不能更浓。
+            // 早先用 ControlPaint.Dark(fore, 0.45f) 只对"深底浅字"成立（压暗=靠向背景）；
+            // 设置页是"浅底深字"，Dark 反而拉高对比度 —— 实测禁用态文字 (28,32,38)
+            // 比可用态 (74,85,104) 还黑，等于把禁用画成了强调。
+            // 改成"向背景色混合 70%"：深底往暗里褪、浅底往白里褪，同一个公式两头都对。
+            Color fore = this.ForeColor;
+            if (!this.Enabled)
+            {
+                Color bg = this.BackColor;
+                fore = Color.FromArgb(
+                    (fore.R * 30 + bg.R * 70) / 100,
+                    (fore.G * 30 + bg.G * 70) / 100,
+                    (fore.B * 30 + bg.B * 70) / 100);
+            }
 
             TextRenderer.DrawText(g, this.Text, this.Font, this.ClientRectangle, fore,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
@@ -5381,16 +5409,16 @@ namespace EyeLite
         private bool suppressPluginToggle;      // 回滚时改 Checked 会再次触发事件，用它挡掉递归
 
         // 版式常量（以下全部是 96dpi 下的设计值，运行时一律经 Sc() 乘 DPI 因子）
-        // 设计基准客户区 520 x 1302：
-        //   88(页头) + 236(节奏，4 行 + 预览按钮 + 渐暗代价小字) + 16 + 144(番茄钟) + 16
+        // 设计基准客户区 520 x 1356：
+        //   88(页头) + 232(节奏，4 行 + 预览按钮 + 渐暗代价小字) + 16 + 144(番茄钟) + 16
         //   + 144(久坐与活动) + 16 + 336(行为，9 行) + 16 + 268(扩展，6 个插件)
-        //   + 24 + 38(按钮) + 18(底部留白) = 1360
+        //   + 24 + 38(按钮) + 18(底部留白) = 1356
         //
         // 这个数字只是"内容的自然高度"，不是硬指标：窗口放不下时由 AutoScroll 兜住，
         // 所以再加行只要同步改这里 + 末尾的 AutoScrollMinSize，不会出现"按钮被切掉"。
         // （「扩展」卡恒定显示 —— 它是插件的唯一开关入口，藏起来就等于没有开关。）
         private const int FormW = 520;
-        private const int FormH = 1360;
+        private const int FormH = 1356;
         private const int CardLeft = 24;
         private const int CardWidth = 472;      // 520 - 24 * 2
         private const int CardPad = 22;         // 卡片左右内边距
@@ -5399,7 +5427,7 @@ namespace EyeLite
         private const int RowHeight = 32;       // 所有行（复选 / 数值）统一 32
         private const int CheckHeight = 26;
         private const int NumWidth = 96;
-        private const int NumHeight = 30;
+        private const int NumHeight = 24;
         private const int Gap = 16;
 
         // DPI 缩放因子（1.0 = 96dpi）。字体是 pt 会随 DPI 放大，盒子必须同比放大，
@@ -5503,9 +5531,11 @@ namespace EyeLite
             chipVersion.Controls.Add(lblVersion);
 
             // ---------- 卡片 1：节奏（4 行 + 预览按钮 + A2 代价小字）----------
-            // 卡片高度：FirstRowTop(38) + 4 行 * 32 + 按钮行 30 + 小字 20 + 底部留白 ≈ 236
+            // 卡片高度：FirstRowTop(38) + 4 行 * 32 + 按钮行 32 + 间隙 4 + 小字 20 + 底部留白 10 ≈ 232
+            // 间隙 4 不能省：按钮 h=32 底边落在 198，小字顶边必须在 202，
+            // 否则两者贴死（v1.6.1 首版就是忘了把按钮加高的 2px 补回来）。
             int y = Sc(88);
-            RoundPanel card1 = AddCard(y, Sc(236), "节奏");
+            RoundPanel card1 = AddCard(y, Sc(232), "节奏");
             numWork = AddRow(card1, Sc(FirstRowTop), "工作时长（分钟）", 1, 240, cfg.WorkMinutes);
             numRest = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight), "休息时长（秒）", 5, 1800, cfg.RestSeconds);
             // 预告窗口（P0-B）：0 = 不预告，直接到点全屏遮罩。
@@ -5517,13 +5547,24 @@ namespace EyeLite
 
             // 现场感受强度：3 秒淡入 → 保持 1 秒 → 1 秒淡出。
             // 光看一个百分数没人能判断合不合适，必须让人当场看一遍。
+            //
+            // 配色（v1.6.1）：原来用 CardBg(#FFFFFF) 底 + SecondaryBorder 描边，
+            // 与右侧输入框（InputBg #F7F9FC + InputBorder）几乎同色，
+            // 用户分不清"这是按钮还是输入框"。改成 SecondaryHover 底 + SecondaryBorder 描边，
+            // 比输入框深一档，一眼能看出是可点的。
             RoundButton btnDimPreview = new RoundButton("预览渐暗", Sc(8),
-                                                       Ui.CardBg, Ui.SecondaryHover,
+                                                       Ui.SecondaryHover, Ui.SecondaryBorder,
                                                        Ui.LabelText, Ui.SecondaryBorder, Math.Max(1, Sc(1)));
             btnDimPreview.Font = Ui.FontRowLabel;
-            btnDimPreview.SetBounds(Sc(CardPad), Sc(FirstRowTop) + Sc(RowHeight) * 4, Sc(120), Sc(30));
+            btnDimPreview.SetBounds(Sc(CardPad), Sc(FirstRowTop) + Sc(RowHeight) * 4, Sc(136), Sc(32));
+            // 强度为 0 时这个按钮点了什么都不会发生，看起来像坏了 —— 直接禁用，
+            // RoundButton.OnPaint 会把 disabled 的文字画灰，用户立刻明白"先调强度"。
+            btnDimPreview.Enabled = cfg.DimAlphaMax > 0;
             btnDimPreview.Click += delegate { StartDimPreview(); };
             card1.Controls.Add(btnDimPreview);
+
+            // 强度一改，按钮可用性立刻跟着变（不用等保存）
+            numDim.ValueChanged += delegate { btnDimPreview.Enabled = numDim.Value > 0; };
 
             // A2 的代价必须写在开关旁边，而不是只写在 README 里：
             // 用户主动把强度从 0 调大，就等于选择了"用时间准确性换一点视觉提示"。
@@ -5534,11 +5575,11 @@ namespace EyeLite
             lblDimNote.BackColor = Ui.CardBg;
             lblDimNote.AutoSize = false;
             lblDimNote.TextAlign = ContentAlignment.MiddleLeft;
-            lblDimNote.SetBounds(Sc(CardPad), Sc(FirstRowTop) + Sc(RowHeight) * 4 + Sc(32),
+            lblDimNote.SetBounds(Sc(CardPad), Sc(FirstRowTop) + Sc(RowHeight) * 4 + Sc(36),
                                  Sc(CardWidth) - Sc(CardPad) * 2, Sc(20));
             card1.Controls.Add(lblDimNote);
 
-            y += Sc(236) + Sc(Gap);
+            y += Sc(232) + Sc(Gap);
 
             // ---------- 卡片 2：番茄钟（3 行）----------
             RoundPanel card2 = AddCard(y, Sc(144), "番茄钟");
@@ -5561,8 +5602,11 @@ namespace EyeLite
             numPostpone = AddRow(card3, Sc(FirstRowTop) + Sc(RowHeight), "推迟时长（分钟）", 1, 60, cfg.PostponeMinutes);
             numIdle = AddRow(card3, Sc(FirstRowTop) + Sc(RowHeight) * 2, "离开多少分钟后暂停计时", 0, 120, cfg.IdleMinutes);
             chkSound = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 3, "开始 / 结束都播放提示音", cfg.SoundEnabled);
+            // 文案长度受行宽硬约束：FlatCheckBox 行宽 Sc(472)-Sc(44)=428，文字起点 26px，
+            // 可用 402px。太长的句子会被 EndEllipsis 切掉（v1.6.0 就是被切了），
+            // 所以这里用短句，但"会中断输入"这个后果提示必须保留。
             chkStrict = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 4,
-                                 "严格模式：休息期间锁住键盘，Esc / 空格退出（会中断输入）", cfg.StrictMode);
+                                 "严格模式：锁键盘，Esc/空格退出（会中断输入）", cfg.StrictMode);
             // P0-C：系统状态闸门（FullscreenDndGate）。
             // 文案里写清"只拦全屏 / 演示"：Win11 的系统免打扰（QUNS_QUIET_TIME）
             // 在很多机器上是常开的，把它也算进去会让本工具等于永不提醒。
@@ -5809,8 +5853,8 @@ namespace EyeLite
             if (chkStrict == null || chkAllowSkip == null) return;
 
             chkStrict.Text = chkAllowSkip.Checked
-                ? "严格模式：休息期间锁住键盘，Esc / 空格退出（会中断输入）"
-                : "严格模式：休息期间只拦系统键，键盘仍可用（不影响输入）";
+                ? "严格模式：锁键盘，Esc/空格退出（会中断输入）"
+                : "严格模式：只拦系统键（键盘仍可用）";
         }
 
         private RoundPanel AddCard(int top, int height, string title)
@@ -5847,16 +5891,24 @@ namespace EyeLite
             // 数值框去 3D 边框：WinForms 默认的 FixedSingle + 系统主题边框是设置页里
             // 唯一还带立体感的东西。改成 BorderStyle.None + 圆角容器描边。
             //
+            // ⚠ 坐标基准的坑（v1.6.1 修的就是这里）：子控件的坐标是**相对父容器**的，
+            // 不是卡片坐标系。之前 n 用卡片坐标（numRight - boxW + Sc(6)）定位到 box 里，
+            // 而 box 只有 NumWidth + Sc(12) 宽 —— 输入框整个落在容器外，被 RoundPanel
+            // 的 Region 圆角裁掉，于是表现为"浅浅一个空白圆角矩形，看不到数字、
+            // 点不进去、也无法聚焦"。n 的 x 必须从 box 的左内边距重新起算。
+            //
             // 容器右缘 = 原来数字框的右缘（右对齐位置一点没动），数字框作为子控件内嵌：
             //   水平各留 Sc(6)（容器宽 = NumWidth + Sc(12)）
-            //   垂直不留 6：行槽只有 Sc(32)，容器做到 Sc(38) 会压到相邻行的文字，
-            //   所以容器高度取满 RowHeight，数字框在其中垂直居中（96dpi 下上下各 1px）。
+            //   垂直：容器比行距矮 Sc(4)、控件再矮 Sc(4)，上下各留 2px ——
+            //   容器取满行距会让相邻行的边框贴死（真机截图里就是一根柱子）
             int numRight = Sc(CardWidth) - Sc(CardPad) - 1;
             int boxW = Sc(NumWidth) + Sc(12);
-            int boxH = Sc(RowHeight);
+            // 容器比行距矮 4（上下各留 2），否则相邻两行的输入框边框会完全贴合，
+            // 四个框连成一根柱子（v1.6.1 第二轮真机截图发现的）。
+            int boxH = Sc(RowHeight) - Sc(4);
 
             RoundPanel box = new RoundPanel(Sc(10), Ui.InputBg, Ui.InputBorder);
-            box.SetBounds(numRight - boxW, top, boxW, boxH);
+            box.SetBounds(numRight - boxW, top + Sc(2), boxW, boxH);
             card.Controls.Add(box);
 
             NumericUpDown n = new NumericUpDown();
@@ -5869,8 +5921,23 @@ namespace EyeLite
             n.BackColor = Ui.InputBg;
             n.AutoSize = false;
             int numH = Sc(NumHeight);
-            int numY = top + (boxH - numH) / 2;
-            n.SetBounds(numRight - boxW + Sc(6), numY, Sc(NumWidth), numH);
+            // x 只有左内边距 Sc(6)；y 只在容器内居中，**不再加 top**（父容器已带 top）
+            n.SetBounds(Sc(6), (boxH - numH) / 2, Sc(NumWidth), numH);
+
+            // 焦点反馈：输入框没有自己的边框，只能用容器的描边色表达"这个框被选中了"。
+            // 用 PrimaryBg(#1F2937) 而不是 Accent(#5FD3A6)：薄荷绿在白卡片上对比太低，
+            // 深灰与主按钮同色，一眼看得出焦点在哪。
+            n.Enter += delegate { box.SetBorderColor(Ui.PrimaryBg); };
+            n.Leave += delegate { box.SetBorderColor(Ui.InputBorder); };
+
+            // 点容器留白（数字左右那 Sc(6)）也该能聚焦 —— 否则用户点"输入框"边缘没反应，
+            // 会以为整个框是坏的。顺带全选，直接打字即覆盖旧值。
+            box.MouseDown += delegate
+            {
+                n.Focus();
+                n.Select(0, n.Text.Length);
+            };
+
             box.Controls.Add(n);
             return n;
         }
@@ -5907,12 +5974,15 @@ namespace EyeLite
             l.BackColor = Ui.CardBg;
             l.AutoSize = false;
             l.TextAlign = ContentAlignment.MiddleLeft;
-            l.SetBounds(Sc(CardPad), top + Sc(4), Sc(152), Sc(24));
+            // 164 而不是 152：「提醒语气（默认温和）」约 10 个汉字 ≈140px，
+            // 152 减去行内左边距后贴着第一个勾选框，文字被挤成换行/截断。
+            l.SetBounds(Sc(CardPad), top + Sc(4), Sc(164), Sc(24));
             card.Controls.Add(l);
 
-            chkTonePlain = MakeToneBox(card, Sc(CardPad) + Sc(156), top,
+            // 两个勾选框整体右移 Sc(12) 让位：264 + 92 = 356 < 可用 428，仍有富余
+            chkTonePlain = MakeToneBox(card, Sc(CardPad) + Sc(168), top,
                                        "冷淡", cfgRef.Tone == 1);
-            chkToneSavage = MakeToneBox(card, Sc(CardPad) + Sc(252), top,
+            chkToneSavage = MakeToneBox(card, Sc(CardPad) + Sc(264), top,
                                         "毒舌", cfgRef.Tone == 2);
 
             // 互斥：勾一个就把另一个取消。suppressTone 挡住递归
@@ -5973,7 +6043,8 @@ namespace EyeLite
             CheckBox box = AddCheck(card, top, name, val);
 
             // 勾选框收窄，给右侧标注让位（AddCheck 默认占满整行）
-            int noteW = Sc(56);
+            // 76 而不是 56：56 装不下「约 0.5 MB」，会被 MiddleRight + EndEllipsis 截成「约 0.5」。
+            int noteW = Sc(76);
             box.SetBounds(box.Left, box.Top,
                           Sc(CardWidth) - Sc(CardPad) * 2 - noteW - Sc(8), box.Height);
 

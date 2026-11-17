@@ -195,6 +195,16 @@ def batch_header():
         has_new = needle in open(EXE, 'rb').read()
     except Exception:
         has_new = False
+    # 产物是否包含当前源码：只看 git status 不够 —— exe 可能早于 src。
+    src = os.path.join(ROOT, 'src', 'Program.cs')
+    try:
+        t_src = os.path.getmtime(src)
+        t_exe = os.path.getmtime(EXE)
+        newer = t_exe > t_src
+        verdict = 'ok' if newer else '**警告：exe 早于 src，产物可能不含当前源码**'
+    except Exception as e:
+        t_src = t_exe = 0
+        verdict = 'ERR:%s' % e
     cfg = read_cfg()
     print('=== 本批起跑 %s ===' % t)
     print('    exe=%s  size=%d  md5=%s' % (EXE_NAME, size, md5))
@@ -203,6 +213,11 @@ def batch_header():
     print('    cfg: WorkMinutes=%s PreviewSeconds=%s IdleMinutes=%s DimAlphaMax=%s'
           % (cfg.get('WorkMinutes'), cfg.get('PreviewSeconds'),
              cfg.get('IdleMinutes'), cfg.get('DimAlphaMax')))
+    if t_src:
+        print('    src mtime=%s  exe mtime=%s  → %s'
+              % (datetime.datetime.fromtimestamp(t_src).strftime('%m-%d %H:%M:%S'),
+                 datetime.datetime.fromtimestamp(t_exe).strftime('%m-%d %H:%M:%S'),
+                 verdict))
 
 
 def read_cfg_raw():

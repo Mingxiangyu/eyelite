@@ -3,7 +3,9 @@
 """
 P3 真机验证：动作幅度 / 双臂对称 / 例程窗可关 / 预告说明文字 / 素材帧识别
 
-被测产物：素材版 `EyeLite.exe`（477184 字节起；**具体指纹以运行时打印的那行为准**）。
+被测产物：**当前工作区的 `EyeLite.exe`（或 `--exe` 指定的文件）**。
+本脚本不假设任何固定的 md5 / 字节数 —— 产物换代很快，跑前会打印 `size + md5`，
+报告里请引用那次打印的值，不要引用本文档/注释里出现过的历史指纹。
 
 ## 仪器坑（先看这段，三条都是踩过的，且都能伪装成"产品缺陷"）
 
@@ -460,8 +462,15 @@ def eyelite_pids():
 
 
 def stop_eyelite():
-    subprocess.run(['taskkill', '/im', 'EyeLite.exe', '/f'], capture_output=True)
+    """只杀**本脚本自己启动过**的实例（`_pid_cache`）。
+
+    为什么不用 `taskkill /im`：那会把别人正在跑的实例一起杀掉 —— 本机今天已因此
+    被腰斩过两次批，也误杀过别人的截图实例。要清历史残留请显式传 --kill-all。
+    """
+    for pid in list(_pid_cache):
+        subprocess.run(['taskkill', '/PID', str(pid), '/f'], capture_output=True)
     _pid_cache.clear()
+    return True
     t0 = time.time()
     while time.time() - t0 < 12:
         if not eyelite_pids():
@@ -900,7 +909,10 @@ def main():
     if not os.path.exists(EXE):
         print('FAIL: EyeLite.exe not found at %s' % EXE)
         return 2
-    print('被测产物: %s (%d bytes)' % (EXE, os.path.getsize(EXE)))
+    import hashlib
+    print('被测产物: %s (%d bytes) md5=%s'
+          % (EXE, os.path.getsize(EXE),
+             hashlib.md5(open(EXE, 'rb').read()).hexdigest()))
 
     want = [a.lower() for a in sys.argv[1:]] or ['all']
     if 'all' in want:
