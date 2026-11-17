@@ -193,6 +193,38 @@ namespace EyeLite
         /// 这会让 (96/96=1.0) 命中并提前 return，永远走不到回退分支
         /// —— 上一版就是这样让 DPI 恒等于 1.0、所有文字继续被裁的。
         /// </summary>
+        private static float scaleCache = 0f;
+
+        /// <summary>
+        /// 进程级 DPI 缩放因子，**全局只算一次**。
+        ///
+        /// 为什么要有它：以前每个窗体构造时都自己调 `DetectScale(this)` 量一遍。
+        /// 量的时机不同、依据的控件不同，就可能拿到不同的值 ——
+        /// 今天的几个 bug（字被裁、光带不贴边、数字看着小）根子都在"同一个缩放，
+        /// 八处各量各的"。这里收敛成唯一入口：谁要缩放，读这里。
+        ///
+        /// 延迟初始化（而不是 static readonly 直接赋值）：`Ui` 是 beforefieldinit，
+        /// 静态字段可能在进程 `SetProcessDPIAware()` 之前就被初始化，
+        /// 那时 `GetDeviceCaps` 只会返回 96，缓存下来就是永久错误。
+        /// 改成"第一次访问时才算"，保证算的时候进程已经声明过 DPI 感知。
+        /// </summary>
+        public static float Scale
+        {
+            get
+            {
+                if (scaleCache <= 0f) scaleCache = DetectScale(null);
+                return scaleCache;
+            }
+        }
+
+        /// <summary>按进程级缩放换算像素。**所有布局尺寸都走这里，不要各写各的。**</summary>
+        public static int S(int px)
+        {
+            float k = Scale;
+            int v = (int)(px * k + 0.5f);
+            return v;
+        }
+
         public static float DetectScale(Control c)
         {
             // 第 1 步：GDI 屏幕 DC + GetDeviceCaps。
@@ -251,7 +283,7 @@ namespace EyeLite
         private static extern int GetDeviceCaps(IntPtr hdc, int index);
 
         /// <summary>设置面板上显示的版本号；发布时与 git tag 同步，只改这一处。</summary>
-        public const string AppVersion = "v1.6.4";
+        public const string AppVersion = "v1.6.5";
 
         /// <summary>圆角矩形路径。调用方负责 Dispose。</summary>
         public static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -1814,11 +1846,12 @@ namespace EyeLite
         private const int BandDefault = 52;     // 96dpi 下的边带厚度（26 仍偏窄，再翻一倍）
 
         private int band = BandDefault;
+        private Rectangle targetBounds;      // 目标矩形（屏幕物理边界），句柄建好后按它纠偏
         private float dpiScale = 1f;
 
         public EdgeGlowForm(Rectangle bounds)
         {
-            dpiScale = Ui.DetectScale(this);
+            dpiScale = Ui.Scale;
 
             this.FormBorderStyle = FormBorderStyle.None;
             this.StartPosition = FormStartPosition.Manual;
@@ -1833,6 +1866,8 @@ namespace EyeLite
 
             band = (int)(BandDefault * dpiScale + 0.5f);
             if (band < 2) band = 2;
+            targetBounds = bounds;
+            TraceGlow("ctor-end");
 
             // 构造期先压到 0：让 CreateParams 带上 WS_EX_LAYERED，首帧不会闪一帧满亮度
             try { this.Opacity = 0.0; }
@@ -1844,6 +1879,43 @@ namespace EyeLite
         protected override bool ShowWithoutActivation
         {
             get { return true; }
+        }
+
+        // 自己声明一份：TrayApp 里那份是 private，跨类用不了。
+        // 单文件项目里这种重复声明是有意的 —— 比给一个 UI 窗体塞依赖到主类干净。
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+                                                int X, int Y, int cx, int cy, uint uFlags);
+        private const uint SWP_NOZORDER = 0x0004;
+        private const uint SWP_NOACTIVATE = 0x0010;
+        private const uint SWP_NOOWNERZORDER = 0x0200;
+
+        /// <summary>
+        /// 句柄建好后把窗口**按物理像素**重新摆一次。
+        ///
+        /// 为什么需要：构造里 `Bounds = screen.Bounds`（主屏 3840×2160）在托管层是对的，
+        /// 但 WinForms 建句柄时会按 `AutoScaleDimensions` 再做一次换算 ——
+        /// 实测主屏窗口的物理尺寸变成 3200×1800，恰是 3840 的 120/144。
+        /// 结果就是"光带贴不到屏幕边上，四周各留一圈"。
+        ///
+        /// `SetWindowPos` 直接下到 Win32，不再经过 WinForms 的缩放逻辑。
+        /// </summary>
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+
+            if (targetBounds.Width > 0 && targetBounds.Height > 0)
+            {
+                try
+                {
+                    SetWindowPos(this.Handle, IntPtr.Zero,
+                                 targetBounds.X, targetBounds.Y,
+                                 targetBounds.Width, targetBounds.Height,
+                                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                }
+                catch { }
+            }
+            RebuildRegion();
         }
 
         protected override CreateParams CreateParams
@@ -1879,14 +1951,41 @@ namespace EyeLite
         }
 
         /// <summary>窗口只占四条窄边：中间区域不属于窗口，天然透明、天然不挡鼠标。</summary>
+        /// <summary>诊断：EYE_LITE_TRACE_GLOW=&lt;文件&gt; 时记录窗口几何（定位"光带不贴边"）。</summary>
+        private void TraceGlow(string tag)
+        {
+            string f = Environment.GetEnvironmentVariable("EYE_LITE_TRACE_GLOW");
+            if (f == null || f.Length == 0) return;
+            try
+            {
+                int dev = 0;
+                System.Reflection.PropertyInfo pi = typeof(Control).GetProperty("DeviceDpi");
+                if (pi != null) { object v = pi.GetValue(this, null); if (v is int) dev = (int)v; }
+                System.IO.File.AppendAllText(f,
+                    tag + " bounds=" + this.Bounds.ToString()
+                    + " client=" + this.ClientSize.ToString()
+                    + " deviceDpi=" + dev + " scale=" + dpiScale
+                    + " primary=" + Screen.PrimaryScreen.Bounds.ToString()
+                    + Environment.NewLine);
+            }
+            catch { }
+        }
+
         private void RebuildRegion()
         {
+            TraceGlow("RebuildRegion");
             Size s = this.ClientSize;
             if (s.Width <= 4 || s.Height <= 4) return;
 
             GraphicsPath path = new GraphicsPath();
             try
             {
+                // **必须 Winding，不能留默认的 Alternate。**
+                // 四条带子在四个角上是重叠的（上∩左 等），而 Alternate 走奇偶规则：
+                // 被覆盖两次的区域算"外面" —— 结果就是四个角各缺一个 band×band 的豁口。
+                // Winding 走非零环绕，重叠区算实心，四角才是连起来的。
+                path.FillMode = FillMode.Winding;
+
                 path.AddRectangle(new Rectangle(0, 0, s.Width, band));                  // 上
                 path.AddRectangle(new Rectangle(0, s.Height - band, s.Width, band));    // 下
                 path.AddRectangle(new Rectangle(0, 0, band, s.Height));                 // 左
@@ -2028,6 +2127,81 @@ namespace EyeLite
         }
 
         /// <summary>每屏一条。只在"真要亮"时创建 —— 未启用插件的进程里一个窗口都没有。</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECTAPI { public int Left, Top, Right, Bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MONITORINFOAPI
+        {
+            public int cbSize;
+            public RECTAPI rcMonitor;
+            public RECTAPI rcWork;
+            public uint dwFlags;
+        }
+
+        private delegate bool MonitorEnumProc(IntPtr hMon, IntPtr hdc, ref RECTAPI lprc, IntPtr data);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprc,
+                                                      MonitorEnumProc proc, IntPtr data);
+        [DllImport("user32.dll")]
+        private static extern bool GetMonitorInfo(IntPtr hMon, ref MONITORINFOAPI mi);
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
+
+        /// <summary>
+        /// 取每块显示器的**物理矩形**。
+        ///
+        /// 为什么不用 `Screen.AllScreens[i].Bounds`：本进程是 system-aware，
+        /// `Screen.Bounds` 给的是"物理 × 系统DPI ÷ 该屏DPI"的虚拟坐标。主屏 DPI 与系统相同
+        /// 时两者一致，接一块缩放比不同的副屏就露馅 ——
+        /// 实测 主屏 3840×2160@150%、副屏 1920×1080@125%，`Screen.Bounds` 给副屏的却是
+        /// (4608,1289) 2304×1296（正好 1.2 倍），光带被画到屏幕外。
+        ///
+        /// 这里临时把**当前线程**切到 PER_MONITOR_AWARE_V2 再枚举：
+        /// 该上下文下 `rcMonitor` 直接就是物理像素。切回去之后窗口才创建，
+        /// 所以不影响程序其余部分的坐标语义。
+        /// </summary>
+        private static List<Rectangle> PhysicalScreens()
+        {
+            List<Rectangle> list = new List<Rectangle>();
+            IntPtr old = IntPtr.Zero;
+            try { old = SetThreadDpiAwarenessContext((IntPtr)(-4)); }   // PMA_V2
+            catch { }
+
+            try
+            {
+                MonitorEnumProc cb = delegate(IntPtr hMon, IntPtr hdc, ref RECTAPI r, IntPtr data)
+                {
+                    MONITORINFOAPI mi = new MONITORINFOAPI();
+                    mi.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(typeof(MONITORINFOAPI));
+                    if (GetMonitorInfo(hMon, ref mi))
+                    {
+                        list.Add(Rectangle.FromLTRB(mi.rcMonitor.Left, mi.rcMonitor.Top,
+                                                    mi.rcMonitor.Right, mi.rcMonitor.Bottom));
+                    }
+                    return true;
+                };
+                EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, cb, IntPtr.Zero);
+            }
+            catch { }
+            finally
+            {
+                if (old != IntPtr.Zero)
+                {
+                    try { SetThreadDpiAwarenessContext(old); } catch { }
+                }
+            }
+
+            // 兜底：枚举失败就退回 Screen 类（主屏一般是准的，副屏可能偏移）
+            if (list.Count == 0)
+            {
+                Screen[] ss = Screen.AllScreens;
+                for (int i = 0; i < ss.Length; i++) list.Add(ss[i].Bounds);
+            }
+            return list;
+        }
+
         private void EnsureForms()
         {
             if (forms != null) return;
@@ -2035,10 +2209,10 @@ namespace EyeLite
             List<EdgeGlowForm> list = new List<EdgeGlowForm>();
             try
             {
-                Screen[] screens = Screen.AllScreens;
-                for (int i = 0; i < screens.Length; i++)
+                List<Rectangle> screens = PhysicalScreens();
+                for (int i = 0; i < screens.Count; i++)
                 {
-                    list.Add(new EdgeGlowForm(screens[i].Bounds));
+                    list.Add(new EdgeGlowForm(screens[i]));
                 }
             }
             catch { }
@@ -2153,7 +2327,7 @@ namespace EyeLite
 
         public RitualForm(int mode)
         {
-            dpiScale = Ui.DetectScale(this);
+            dpiScale = Ui.Scale;
             this.mode = mode;
 
             this.FormBorderStyle = FormBorderStyle.None;
@@ -3052,7 +3226,7 @@ namespace EyeLite
 
         public MoveForm(List<MoveItem> actions, int restSeconds)
         {
-            dpiScale = Ui.DetectScale(this);
+            dpiScale = Ui.Scale;
 
             this.items = actions;
             int budget = restSeconds;
@@ -4386,7 +4560,7 @@ namespace EyeLite
                         bool withSittingOption)
         {
             // 必须在算任何版式之前取到 DPI 因子（此时窗体还没有句柄）
-            dpiScale = Ui.DetectScale(this);
+            dpiScale = Ui.Scale;
 
             this.allowSkip = allowSkip;
             this.showButtons = withButtons;
@@ -5156,7 +5330,7 @@ namespace EyeLite
 
         public PreviewForm()
         {
-            dpiScale = Ui.DetectScale(this);
+            dpiScale = Ui.Scale;
 
             this.FormBorderStyle = FormBorderStyle.None;
             this.StartPosition = FormStartPosition.Manual;
@@ -5449,7 +5623,7 @@ namespace EyeLite
 
         public ModeToastForm()
         {
-            dpiScale = Ui.DetectScale(this);
+            dpiScale = Ui.Scale;
 
             this.FormBorderStyle = FormBorderStyle.None;
             this.StartPosition = FormStartPosition.Manual;
@@ -5601,7 +5775,7 @@ namespace EyeLite
         public DimForm(Rectangle bounds)
         {
             // 光带厚度要过 DPI 缩放，否则 150% 下边缘细得像头发丝
-            dpiScale = Ui.DetectScale(this);
+            dpiScale = Ui.Scale;
 
             this.FormBorderStyle = FormBorderStyle.None;
             this.StartPosition = FormStartPosition.Manual;
@@ -5822,7 +5996,7 @@ namespace EyeLite
         public SettingsForm(AppConfig cfg)
         {
             // 必须在算任何版式 / 设 ClientSize 之前取到 DPI 因子
-            dpiScale = Ui.DetectScale(this);
+            dpiScale = Ui.Scale;
 
             // 插件开关要"勾上就生效"，所以留住配置引用（ApplyTo 只在点保存时才跑）
             this.cfgRef = cfg;
