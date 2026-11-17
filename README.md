@@ -123,6 +123,11 @@ EyeLite 是一个只做一件事的 Windows 托盘程序：每隔 N 分钟弹出
 
 深色遮罩与浅色设置面板是刻意的对比：遮罩要「压住」注意力，设置面板要「好读好改」。
 
+数值框是自绘的单行输入框（不是 WinForms 的 `NumericUpDown`）：**没有上下小箭头**，
+数字居中、15pt 粗体，只接受数字并在失焦时自动夹回合法范围。去掉原生箭头是因为
+它右侧固定吃掉 42px（150% 下）且跟扁平圆角风格不搭 —— 代价是不能再用鼠标点加减，
+但滚轮、直接输入、Tab 都在。
+
 > 本目录的截图由 `tools/shoot.py` 生成（`ctypes` + 标准库 `zlib` 手写 PNG，不依赖 PIL）。
 > 它用 `PrintWindow` 让目标窗口自绘，**不会把你桌面上的其它窗口拍进去**。
 
@@ -276,12 +281,13 @@ GDI 对象数（`GetGuiResources`）：**启动即 47**（见下），稳态 47 
 
 ```
 EyeLite/
-├─ src/Program.cs          # 全部源码（单文件，约 9300 行；无第三方依赖）
+├─ src/Program.cs          # 全部源码（单文件，约 9900 行；无第三方依赖）
 ├─ build.cmd               # 双击编译（用系统自带 csc.exe）；/check = 只做语法门
 ├─ build-check.cmd         # 语法门入口（不覆盖正在运行的 EyeLite.exe）
 ├─ release.cmd             # 编译 + 打包 dist/EyeLite-<版本>.zip
 ├─ checkmem.cmd/.ps1       # 查看内存占用与 GDI 对象数
 ├─ assets/
+│  ├─ app.ico              # exe 文件图标（tools/make-icon.py 生成，与托盘环同色系）
 │  ├─ ATTRIBUTION.md       # 素材署名与许可（CC BY-SA 4.0）
 │  └─ moves/               # 9 个动作 × 3 帧 + manifest.json（约 1.1 MB）
 ├─ docs/
@@ -290,10 +296,13 @@ EyeLite/
 │  ├─ P2-计划.md           # 计划与拍板记录（含"为什么当初这么决定"）
 │  ├─ qa/                  # 用例定义、验收记录、选型与调查
 │  └─ screenshots/         # README 用图，全部由 tools/shoot.py 生成
-├─ tools/                  # 验收脚本（27 个 Python，零第三方依赖）
+├─ tools/                  # 验收脚本（31 个 Python，零第三方依赖）
 │  ├─ p0-regression.py     # P0 总回归：fast ≈ 4 分钟 / all ≈ 20~35 分钟
 │  ├─ p1-batch*.py         # 插件与反作弊
 │  ├─ p2-*.py / p3-*.py    # 功能专项
+│  ├─ settings-ui-check.py # 设置页行为判据（输入框可点/可聚焦、版式）
+│  ├─ precheck-provenance  # 产物来源门禁（src/exe 是否对得上）
+│  ├─ make-icon.py         # 生成 assets/app.ico
 │  └─ shoot.py             # 截图（PrintWindow，绝不截屏）
 ├─ LICENSE                 # MIT
 └─ README.md
