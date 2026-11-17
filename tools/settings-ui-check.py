@@ -1357,6 +1357,11 @@ def main():
         btn_save = find_btn('保存')
         btn_cancel = find_btn('取消')
         sb_children = [k for k in kids if 'SCROLL' in class_name(k).upper()]
+        # 诊断：把全部 BUTTON 文本打一遍。如果哪天按钮文案改了、find_btn 返回 None，
+        # 这一行能立刻告出真相，不用再猜"是找不到按钮还是产品没按钮"。
+        print('      BUTTON 文本: %s'
+              % (' | '.join((window_text(k) or '(空)') for k in kids
+                            if short_class(class_name(k)) == 'BUTTON')[:160]))
 
         # ---- E1 有没有垂直滚动条 ----
         # 三条独立证据：WS_VSCROLL 样式位、滚动条子窗口、窗口宽 − 客户区宽 的差值。
@@ -1403,7 +1408,11 @@ def main():
                 REP.add('SKIP', 'E3', 'PrintWindow 抓图失败，无法从位图数留白像素')
             else:
                 cb_img = oy3 + ch                       # 客户区底边在图像里的行
-                start = oy3 + sy1 + 2                   # 按钮底边下 2 行，避开描边/抗锯齿
+                # 从按钮底边下 4 行开始数：按钮自己的圆角描边 + 抗锯齿会占掉底边下方
+                # 1~2 行，从 +2 起数有可能第一行就不是纯背景 → 假 FAIL。
+                # +4 对两种边界都安全：真留白 21px 时量到 ~17（仍 ≥10）；
+                # 贴死那种情况按钮底边已越过客户区底边，会走上面的几何分支直接 FAIL。
+                start = oy3 + sy1 + 4
                 gap_rows = 0
                 if start >= cb_img:
                     REP.add('FAIL', 'E3',
