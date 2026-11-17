@@ -158,7 +158,7 @@ namespace EyeLite
         public static readonly Font FontRowLabel = new Font("微软雅黑", 10.5f, FontStyle.Regular);
         // 设置页数值框专用：10.5pt 在 88px 宽的框里看着"很小、只占右边一小条"，
         // 与标签同字号也分不出"这是要填的数"。12pt 是 24px 高的输入框在不裁字的前提下能放下的最大档。
-        public static readonly Font FontNumInput = new Font("微软雅黑", 15f, FontStyle.Bold);
+        public static readonly Font FontNumInput = new Font("微软雅黑", 14f, FontStyle.Bold);
         // 14.5pt 是"26px 高的输入框还不裁字"的上限：150% 下行高约 38px，控件 26×1.5=39px。
         // 再大就得动 RowHeight，而 RowHeight 一动，9 行卡片高度全变、整页重排。
         // 二分验证过字号确实生效：同一处改成 20pt 时数字墨迹 21px、14.5pt 时约 15px，
@@ -215,6 +215,20 @@ namespace EyeLite
                 if (scaleCache <= 0f) scaleCache = DetectScale(null);
                 return scaleCache;
             }
+        }
+
+        /// <summary>
+        /// 某个字体在**当前 DPI 下的实际行高**（物理像素）。
+        ///
+        /// 为什么需要：盒子高度必须由"字有多高"反推，不能另写一个常量。
+        /// 早先 RowHeight=32 是给 10.5pt 配的，后来字号提到 15pt，盒子没跟着变 ——
+        /// 结果就是字被裁。**字号是唯一源头，行高 = 字高 + 留白。**
+        /// </summary>
+        public static int TextH(Font f)
+        {
+            if (f == null) return 0;
+            try { return TextRenderer.MeasureText("国0", f).Height; }
+            catch { return (int)(f.SizeInPoints * 96f / 72f); }
         }
 
         /// <summary>按进程级缩放换算像素。**所有布局尺寸都走这里，不要各写各的。**</summary>
@@ -5979,14 +5993,25 @@ namespace EyeLite
         // 本轮没做：它要改 AutoScrollMinSize 语义（btnY+38+18 → cursorTop+24），
         // 而设置页几何刚验收通过（tools/settings-ui-check.py 32/32），不值得在封板日重构。
         private const int FormW = 520;
-        private const int FormH = 1332;
+        // 窗体高度也不写常量了：由卡片推导链算出来（见 EstimateFormH）。
+        // 以前是 1332，每次加一行就要手工压间距凑像素 —— 改字号/加行必然错。
+
         private const int CardLeft = 24;
         private const int CardWidth = 472;      // 520 - 24 * 2
         private const int CardPad = 22;         // 卡片左右内边距
         private const int CardTitleTop = 14;
-        private const int FirstRowTop = 38;
-        private const int RowHeight = 32;       // 所有行（复选 / 数值）统一 32
-        private const int CheckHeight = 26;
+
+        // ---- 行高不再写常量，全部由**字号**推导 ----
+        //
+        // 以前是 `RowHeight = 32`（按 10.5pt 配的），后来数值字号提到 15pt，盒子没跟着变，
+        // 字就被裁 —— "字体大小也出问题"的根子就是这个：**字号和行高是两个独立常量，
+        // 改一个必然错位**。
+        // 现在只有一个源头：`Ui.FontNumInput` / `Ui.FontRowLabel` 的字高，
+        // 行高 = 字高 + 上下留白。改字号，行高、卡片高、整页高自动跟着走。
+        private int rowH;           // 一行的高度（数值行）
+        private int checkH;         // 复选行高度（按标签字号）
+        private int firstRowTop;    // 卡片标题下第一行的 y
+        private int h1, h2, h3, h4, h5;   // 五张卡的高度（构造早期算一次，处处复用）
         // 框宽是怎么定下来的（96 → 80 → 64 → 54 → 48 → 42）：
         //   去掉上下箭头之前，UpDownButtons 固定吃掉右侧约 42px（150%），
         //   框越宽数字占比越小、左边空白越大，看着像"空框里漂着几个小符号"；
@@ -6011,6 +6036,16 @@ namespace EyeLite
             // 必须在算任何版式 / 设 ClientSize 之前取到 DPI 因子
             dpiScale = Ui.Scale;
 
+            // 行高全部从字号推出来（见字段区注释）。留白 6px 是"框与框之间看得出缝"的最小值，
+            // 再小上下两行的圆角容器会贴在一起（v1.6.1 那根"柱子"就是这么来的）。
+            int numTextH = Ui.TextH(Ui.FontNumInput);
+            int labelTextH = Ui.TextH(Ui.FontRowLabel);
+            rowH = numTextH + Sc(6);
+            checkH = labelTextH + Sc(10);
+            if (rowH < Sc(28)) rowH = Sc(28);      // 兜底：算不出字高时退回一个能看的行高
+            if (checkH < rowH) checkH = rowH;      // 复选行不比数值行矮
+            firstRowTop = Sc(CardTitleTop) + labelTextH + Sc(10);
+
             // 插件开关要"勾上就生效"，所以留住配置引用（ApplyTo 只在点保存时才跑）
             this.cfgRef = cfg;
 
@@ -6027,8 +6062,16 @@ namespace EyeLite
             // 典型场景：笔记本内屏 1080p @150% -> 窗口 1068 高于工作区 1032，
             // 底部「保存」会被任务栏盖住。钳高 + 滚动保证按钮永远可达；
             // 放得下时 AutoScroll 不显示滚动条，完全无感。
+            // 各卡高度**只在这里算一次**，下面建控件时直接复用：
+            // 同一个值算两遍就有"两处不一致"的风险，而这正是之前反复出错的地方。
+            h1 = CardH(4, Sc(36) + Sc(20));      // 节奏：4 数值行 + 预览按钮 + 代价小字
+            h2 = CardH(3);                       // 番茄钟
+            h3 = CardH(3);                       // 久坐与活动
+            h4 = CardH(9);                       // 行为
+            h5 = CardH(6, Sc(30));               // 扩展：6 个插件行 + 卡底小字
+
             int clientW = Sc(FormW);
-            int clientH = Sc(FormH);
+            int clientH = EstimateFormH();
             int maxH;
             try
             {
@@ -6102,14 +6145,14 @@ namespace EyeLite
             // 间隙 4 不能省：按钮 h=32 底边落在 198，小字顶边必须在 202，
             // 否则两者贴死（v1.6.1 首版就是忘了把按钮加高的 2px 补回来）。
             int y = Sc(88);
-            RoundPanel card1 = AddCard(y, Sc(232), "节奏");
-            numWork = AddRow(card1, Sc(FirstRowTop), "工作时长（分钟）", 1, 240, cfg.WorkMinutes);
-            numRest = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight), "休息时长（秒）", 5, 1800, cfg.RestSeconds);
+            RoundPanel card1 = AddCard(y, h1, "节奏");
+            numWork = AddRow(card1, firstRowTop, "工作时长（分钟）", 1, 240, cfg.WorkMinutes);
+            numRest = AddRow(card1, firstRowTop + rowH, "休息时长（秒）", 5, 1800, cfg.RestSeconds);
             // 预告窗口（P0-B）：0 = 不预告，直接到点全屏遮罩。
             // 放在「节奏」卡而不是「行为」卡，因为它改的是提醒**时机**而不是行为约束。
-            numPreview = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight) * 2, "提前预告（秒，0=不预告）", 0, 300, cfg.PreviewSeconds);
+            numPreview = AddRow(card1, firstRowTop + rowH * 2, "提前预告（秒，0=不预告）", 0, 300, cfg.PreviewSeconds);
             // A2 渐进降饱和：0 = 关闭（一个窗口都不创建），上限 70 见 AppConfig.DimAlphaMax 的注释。
-            numDim = AddRow(card1, Sc(FirstRowTop) + Sc(RowHeight) * 3,
+            numDim = AddRow(card1, firstRowTop + rowH * 3,
                             "休息前渐暗强度（%，0=关闭）", 0, 70, cfg.DimAlphaMax);
 
             // 现场感受强度：3 秒淡入 → 保持 1 秒 → 1 秒淡出。
@@ -6123,7 +6166,7 @@ namespace EyeLite
                                                        Ui.SecondaryHover, Ui.SecondaryBorder,
                                                        Ui.LabelText, Ui.SecondaryBorder, Math.Max(1, Sc(1)));
             btnDimPreview.Font = Ui.FontRowLabel;
-            btnDimPreview.SetBounds(Sc(CardPad), Sc(FirstRowTop) + Sc(RowHeight) * 4, Sc(136), Sc(32));
+            btnDimPreview.SetBounds(Sc(CardPad), firstRowTop + rowH * 4, Sc(136), Sc(32));
             // 强度为 0 时这个按钮点了什么都不会发生，看起来像坏了 —— 直接禁用，
             // RoundButton.OnPaint 会把 disabled 的文字画灰，用户立刻明白"先调强度"。
             btnDimPreview.Enabled = cfg.DimAlphaMax > 0;
@@ -6142,71 +6185,71 @@ namespace EyeLite
             lblDimNote.BackColor = Ui.CardBg;
             lblDimNote.AutoSize = false;
             lblDimNote.TextAlign = ContentAlignment.MiddleLeft;
-            lblDimNote.SetBounds(Sc(CardPad), Sc(FirstRowTop) + Sc(RowHeight) * 4 + Sc(36),
+            lblDimNote.SetBounds(Sc(CardPad), firstRowTop + rowH * 4 + Sc(36),
                                  Sc(CardWidth) - Sc(CardPad) * 2, Sc(20));
             card1.Controls.Add(lblDimNote);
 
-            y += Sc(232) + Sc(Gap);
+            y += h1 + Sc(Gap);
 
             // ---------- 卡片 2：番茄钟（3 行）----------
-            RoundPanel card2 = AddCard(y, Sc(144), "番茄钟");
-            chkPomodoro = AddCheck(card2, Sc(FirstRowTop), "启用番茄钟模式", cfg.PomodoroEnabled);
-            numPomoWork = AddRow(card2, Sc(FirstRowTop) + Sc(RowHeight), "番茄工作（分钟）", 1, 240, cfg.PomodoroWork);
-            numPomoRest = AddRow(card2, Sc(FirstRowTop) + Sc(RowHeight) * 2, "番茄休息（分钟）", 1, 120, cfg.PomodoroRest);
-            y += Sc(144) + Sc(Gap);
+            RoundPanel card2 = AddCard(y, h2, "番茄钟");
+            chkPomodoro = AddCheck(card2, firstRowTop, "启用番茄钟模式", cfg.PomodoroEnabled);
+            numPomoWork = AddRow(card2, firstRowTop + rowH, "番茄工作（分钟）", 1, 240, cfg.PomodoroWork);
+            numPomoRest = AddRow(card2, firstRowTop + rowH * 2, "番茄休息（分钟）", 1, 120, cfg.PomodoroRest);
+            y += h2 + Sc(Gap);
 
             // ---------- 卡片 3：久坐与活动（3 行）----------
             // 第二套时钟：与护眼节奏独立，久坐到点触发的是"活动休息"（正文案见 TrayApp.BeginRest）
-            RoundPanel cardSed = AddCard(y, Sc(144), "久坐与活动");
-            chkSedentary = AddCheck(cardSed, Sc(FirstRowTop), "启用久坐提醒（每小时起身活动）", cfg.SedentaryEnabled);
-            numSedMinutes = AddRow(cardSed, Sc(FirstRowTop) + Sc(RowHeight), "久坐间隔（分钟）", 15, 180, cfg.SedentaryMinutes);
-            numSedSeconds = AddRow(cardSed, Sc(FirstRowTop) + Sc(RowHeight) * 2, "活动时长（秒）", 30, 300, cfg.SedentarySeconds);
-            y += Sc(144) + Sc(Gap);
+            RoundPanel cardSed = AddCard(y, h3, "久坐与活动");
+            chkSedentary = AddCheck(cardSed, firstRowTop, "启用久坐提醒（每小时起身活动）", cfg.SedentaryEnabled);
+            numSedMinutes = AddRow(cardSed, firstRowTop + rowH, "久坐间隔（分钟）", 15, 180, cfg.SedentaryMinutes);
+            numSedSeconds = AddRow(cardSed, firstRowTop + rowH * 2, "活动时长（秒）", 30, 300, cfg.SedentarySeconds);
+            y += h3 + Sc(Gap);
 
             // ---------- 卡片 4：行为（9 行）----------
-            RoundPanel card3 = AddCard(y, Sc(336), "行为");
-            chkAllowSkip = AddCheck(card3, Sc(FirstRowTop), "允许跳过 / 推迟休息", cfg.AllowSkip);
-            numPostpone = AddRow(card3, Sc(FirstRowTop) + Sc(RowHeight), "推迟时长（分钟）", 1, 60, cfg.PostponeMinutes);
-            numIdle = AddRow(card3, Sc(FirstRowTop) + Sc(RowHeight) * 2, "离开多少分钟后暂停计时", 0, 120, cfg.IdleMinutes);
-            chkSound = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 3, "开始 / 结束都播放提示音", cfg.SoundEnabled);
+            RoundPanel card3 = AddCard(y, h4, "行为");
+            chkAllowSkip = AddCheck(card3, firstRowTop, "允许跳过 / 推迟休息", cfg.AllowSkip);
+            numPostpone = AddRow(card3, firstRowTop + rowH, "推迟时长（分钟）", 1, 60, cfg.PostponeMinutes);
+            numIdle = AddRow(card3, firstRowTop + rowH * 2, "离开多少分钟后暂停计时", 0, 120, cfg.IdleMinutes);
+            chkSound = AddCheck(card3, firstRowTop + rowH * 3, "开始 / 结束都播放提示音", cfg.SoundEnabled);
             // 文案长度受行宽硬约束：FlatCheckBox 行宽 Sc(472)-Sc(44)=428，文字起点 26px，
             // 可用 402px。太长的句子会被 EndEllipsis 切掉（v1.6.0 就是被切了），
             // 所以这里用短句，但"会中断输入"这个后果提示必须保留。
-            chkStrict = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 4,
+            chkStrict = AddCheck(card3, firstRowTop + rowH * 4,
                                  "严格模式：锁键盘，Esc/空格退出（会中断输入）", cfg.StrictMode);
             // P0-C：系统状态闸门（FullscreenDndGate）。
             // 文案里写清"只拦全屏 / 演示"：Win11 的系统免打扰（QUNS_QUIET_TIME）
             // 在很多机器上是常开的，把它也算进去会让本工具等于永不提醒。
-            chkSuppressFullscreen = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 5,
+            chkSuppressFullscreen = AddCheck(card3, firstRowTop + rowH * 5,
                                  "全屏 / 演示时暂缓提醒（最多暂缓 30 分钟）", cfg.SuppressOnFullscreen);
-            chkAutoStart = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 6,
+            chkAutoStart = AddCheck(card3, firstRowTop + rowH * 6,
                                     "开机自动启动", cfg.StartWithWindows);
             // G14 预留：只放一个禁用的开关占位，**不写回配置**（cfg.CameraCountEnabled 保持原值），
             // 避免用户以为勾上就生效。v1.2 有了 CameraBodyCounter 再解禁并接 IBodyCounter。
             // 用局部变量而不是字段：没有读取方，留字段只会多一个"永远用不到"的状态位。
-            CheckBox chkCamera = AddCheck(card3, Sc(FirstRowTop) + Sc(RowHeight) * 7, "摄像头计数（暂未开放）", false);
+            CheckBox chkCamera = AddCheck(card3, firstRowTop + rowH * 7, "摄像头计数（暂未开放）", false);
             chkCamera.Enabled = false;
             // G12：放在最后一行 —— 语气只影响遮罩上的几句话，不动任何行为，
             // 所以不插在「跳过 / 推迟 / 严格模式」这些真正改变后果的开关中间。
-            AddToneRow(card3, Sc(FirstRowTop) + Sc(RowHeight) * 8);
+            AddToneRow(card3, firstRowTop + rowH * 8);
 
             // ---------- 卡片 5：扩展（插件开关）----------
             // 这张卡是**插件唯一的开关入口**，所以恒定显示（不能按"有没有插件开"来决定显隐，
             // 否则第一次想开的时候根本找不到开关）。
             // 已有四张卡的位置/尺寸一个像素都没动，只是本卡插在它们下面 ——
             // 保存按钮因此下移 Sc(284)，这是新增功能必然要付的版面代价（AutoScroll 兜住小屏）。
-            int extTop = y + Sc(336) + Sc(Gap);
-            RoundPanel cardExt = AddCard(extTop, Sc(268), "扩展");
+            int extTop = y + h4 + Sc(Gap);
+            RoundPanel cardExt = AddCard(extTop, h5, "扩展");
 
             // 顺序按内存代价从小到大（Stats 几乎零成本 → Guard 只有一个计数器 → 窗口类插件在后）。
             // 右侧占用标注是 tools/plugin-mem-check.py 的实测值（同配置开/关对照）。
             // 只有"暂未实测"的项才写「待测」——不写估算。
-            AddPluginRow(cardExt, Sc(FirstRowTop), "Stats", "用眼统计", cfg.Plugin_Stats, "<0.5 MB");
-            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 1, "EdgeGlow", "屏幕边缘微光", cfg.Plugin_EdgeGlow, "约 0.5 MB");
-            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 2, "Ritual", "休息仪式（眼操/呼吸）", cfg.Plugin_Ritual, "约 2 MB");
-            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 3, "Sound", "仪式音", cfg.Plugin_Sound, "约 0.7 MB");
-            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 4, "Movement", "起身活动演示", cfg.Plugin_Movement, "约 2.3 MB");
-            AddPluginRow(cardExt, Sc(FirstRowTop) + Sc(RowHeight) * 5, "Guard", "跳过配额", cfg.Plugin_Guard, "<0.5 MB");
+            AddPluginRow(cardExt, firstRowTop, "Stats", "用眼统计", cfg.Plugin_Stats, "<0.5 MB");
+            AddPluginRow(cardExt, firstRowTop + rowH * 1, "EdgeGlow", "屏幕边缘微光", cfg.Plugin_EdgeGlow, "约 0.5 MB");
+            AddPluginRow(cardExt, firstRowTop + rowH * 2, "Ritual", "休息仪式（眼操/呼吸）", cfg.Plugin_Ritual, "约 2 MB");
+            AddPluginRow(cardExt, firstRowTop + rowH * 3, "Sound", "仪式音", cfg.Plugin_Sound, "约 0.7 MB");
+            AddPluginRow(cardExt, firstRowTop + rowH * 4, "Movement", "起身活动演示", cfg.Plugin_Movement, "约 2.3 MB");
+            AddPluginRow(cardExt, firstRowTop + rowH * 5, "Guard", "跳过配额", cfg.Plugin_Guard, "<0.5 MB");
 
             // 卡底小字：必须写明"关掉会回落"，否则用户不敢试。
             Label lblExtNote = new Label();
@@ -6216,7 +6259,7 @@ namespace EyeLite
             lblExtNote.BackColor = Ui.CardBg;
             lblExtNote.AutoSize = false;
             lblExtNote.TextAlign = ContentAlignment.MiddleLeft;
-            lblExtNote.SetBounds(Sc(CardPad), Sc(FirstRowTop) + Sc(RowHeight) * 6,
+            lblExtNote.SetBounds(Sc(CardPad), firstRowTop + rowH * 6,
                                  Sc(CardWidth) - Sc(CardPad) * 2, Sc(24));
             cardExt.Controls.Add(lblExtNote);
 
@@ -6226,19 +6269,19 @@ namespace EyeLite
             if (cfg.Plugin_Stats)
             {
                 int statTop = cursorTop + Sc(Gap);
-                int statH = Sc(168) + Sc(RowHeight);
+                int statH = Sc(168) + rowH;
                 RoundPanel cardStat = AddCard(statTop, statH, "统计");
 
-                AddInfoRow(cardStat, Sc(FirstRowTop), "完成 " + cfg.StatDone + " 次", Ui.LabelText);
-                AddInfoRow(cardStat, Sc(FirstRowTop) + Sc(RowHeight) * 1, "跳过 " + cfg.StatSkip + " 次", Ui.LabelText);
-                AddInfoRow(cardStat, Sc(FirstRowTop) + Sc(RowHeight) * 2, "忽略 " + cfg.StatIgnore + " 次", Ui.LabelText);
+                AddInfoRow(cardStat, firstRowTop, "完成 " + cfg.StatDone + " 次", Ui.LabelText);
+                AddInfoRow(cardStat, firstRowTop + rowH * 1, "跳过 " + cfg.StatSkip + " 次", Ui.LabelText);
+                AddInfoRow(cardStat, firstRowTop + rowH * 2, "忽略 " + cfg.StatIgnore + " 次", Ui.LabelText);
                 // 最近 7 天趋势：只画"完成"，因为三种状态挤一张图谁都读不出来。
-                AddInfoRow(cardStat, Sc(FirstRowTop) + Sc(RowHeight) * 3,
+                AddInfoRow(cardStat, firstRowTop + rowH * 3,
                            "最近 7 天完成：" + StatsPlugin.Sparkline(cfg)
                            + "（左旧右新）", Ui.LabelText);
                 // 这句不是免责声明套话：三态计数非常容易被读成"用眼健康评分"，
                 // 必须明确这不是健康判断，否则就是在制造焦虑。
-                AddInfoRow(cardStat, Sc(FirstRowTop) + Sc(RowHeight) * 4,
+                AddInfoRow(cardStat, firstRowTop + rowH * 4,
                            "这不是健康诊断，只记录发生过的次数", Ui.CaptionText);
 
                 cursorTop = statTop + statH;
@@ -6433,6 +6476,35 @@ namespace EyeLite
                 : "严格模式：只拦系统键（键盘仍可用）";
         }
 
+        /// <summary>
+        /// 整窗高度 = 页头 + 五张卡 + 统计卡 + 底部按钮区。**全部由 rowH 推导**。
+        ///
+        /// 以前的写法是"常量 1332 + 手工压间距"，本质是在用调参追一个本该算出来的数：
+        /// 加一行、改字号、换 DPI，三件事随便动一件它就错，只能再压一次。
+        /// </summary>
+        private int EstimateFormH()
+        {
+            int body = Sc(88);                                   // 页头到第一张卡
+            body += h1 + Sc(Gap) + h2 + Sc(Gap) + h3 + Sc(Gap) + h4 + Sc(Gap) + h5 + Sc(Gap);
+            body += Sc(34);                                      // 统计卡（默认隐藏，按它的标题+边框预留）
+            body += Sc(38) + Sc(14);                             // 保存/取消/关于 按钮区 + 底部留白
+            return body;
+        }
+
+        /// <summary>
+        /// 卡片高度 = 标题 + 行数 × 行高 + 额外块 + 底部留白。**不再写 232/144/336 这种魔数。**
+        /// 魔数的问题不是丑，是"改字号会错位"：行高变了、卡片没变，最后一行就被切掉半截。
+        /// </summary>
+        private int CardH(int rows)
+        {
+            return firstRowTop + rows * rowH + Sc(10);
+        }
+
+        private int CardH(int rows, int extra)
+        {
+            return firstRowTop + rows * rowH + extra + Sc(10);
+        }
+
         private RoundPanel AddCard(int top, int height, string title)
         {
             RoundPanel card = new RoundPanel(Sc(12), Ui.CardBg, Ui.CardBorder);
@@ -6481,7 +6553,7 @@ namespace EyeLite
             int boxW = Sc(NumWidth) + Sc(12);
             // 容器比行距矮 4（上下各留 2），否则相邻两行的输入框边框会完全贴合，
             // 四个框连成一根柱子（v1.6.1 第二轮真机截图发现的）。
-            int boxH = Sc(RowHeight) - Sc(4);
+            int boxH = rowH - Sc(4);
 
             RoundPanel box = new RoundPanel(Sc(10), Ui.InputBg, Ui.InputBorder);
             box.SetBounds(numRight - boxW, top + Sc(2), boxW, boxH);
@@ -6537,7 +6609,7 @@ namespace EyeLite
             c.BackColor = Ui.CardBg;                // 必须显式设成卡片白底
             c.AutoSize = false;
             // Sc(32) 的行槽里放 Sc(26) 高的复选行，下压 Sc(3) 与相邻数值行视觉居中对齐
-            c.SetBounds(Sc(CardPad), top + Sc(3), Sc(CardWidth) - Sc(CardPad) * 2, Sc(CheckHeight));
+            c.SetBounds(Sc(CardPad), top + Sc(3), Sc(CardWidth) - Sc(CardPad) * 2, checkH);
             card.Controls.Add(c);
             return c;
         }
@@ -6597,7 +6669,7 @@ namespace EyeLite
             c.ForeColor = Ui.LabelText;
             c.BackColor = Ui.CardBg;
             c.AutoSize = false;
-            c.SetBounds(left, top + Sc(3), Sc(92), Sc(CheckHeight));
+            c.SetBounds(left, top + Sc(3), Sc(92), checkH);
             card.Controls.Add(c);
             return c;
         }
