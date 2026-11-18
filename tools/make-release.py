@@ -94,18 +94,23 @@ def main():
 
     fingerprint = (
         'EyeLite %s\n'
-        'EyeLite.exe  %d bytes  md5 %s\n'
+        'EyeLite-%s.exe  %d bytes  md5 %s\n'
         'Program.cs   md5 %s\n'
         '\n'
         '（反馈问题时请附上这两行，否则无法确认版本）\n'
-        % (ver, exe_size, exe_md5, src_md5))
+        % (ver, ver, exe_size, exe_md5, src_md5))
 
     if not os.path.isdir(DIST):
         os.makedirs(DIST)
     out = os.path.join(DIST, 'EyeLite-%s.zip' % ver)
 
+    # 包内 exe **带版本号**：用户解压出来一眼就知道是哪个版本
+    # （原话："我现在都不知道是哪个版本了"）。
+    # 源码树里仍叫 EyeLite.exe —— tools/ 下几十个测试脚本都按那个名字找它，不能动。
+    exe_name = 'EyeLite-%s.exe' % ver
+
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
-        z.write(EXE, 'EyeLite.exe')
+        z.write(EXE, exe_name)
         if os.path.exists(README):
             z.write(README, 'README.md')
         z.writestr('安装与使用.txt', USAGE.replace('\n', '\r\n'))

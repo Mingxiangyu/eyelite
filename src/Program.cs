@@ -23,6 +23,22 @@ using System.Text;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
+// =====================================================================
+//  程序集元信息 —— exe 右键「属性 → 详细信息」里看到的就是这几行。
+//
+//  为什么要写：用户反馈"我现在都不知道是哪个版本了"。
+//  设置页里那个 chip 是**运行时**读 Ui.AppVersion；而文件属性是**编译期**资源，
+//  两者必须一致，否则"界面说 v1.6.6、属性说 1.6.5"会让人更糊涂。
+//  改版本时同步三处：Ui.AppVersion、AssemblyVersion、AssemblyFileVersion
+//  （后两个必须是字面量，不能引用常量），`tools/precheck-provenance.py` 会核对。
+// =====================================================================
+[assembly: System.Reflection.AssemblyTitle("护眼小助手 EyeLite")]
+[assembly: System.Reflection.AssemblyProduct("EyeLite")]
+[assembly: System.Reflection.AssemblyDescription("托盘护眼提醒：20-20-20 + 番茄钟，单文件零依赖")]
+[assembly: System.Reflection.AssemblyCopyright("MIT License")]
+[assembly: System.Reflection.AssemblyVersion("1.6.6.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.6.6.0")]
+
 namespace EyeLite
 {
     // ================================================================
@@ -297,7 +313,11 @@ namespace EyeLite
         private static extern int GetDeviceCaps(IntPtr hdc, int index);
 
         /// <summary>设置面板上显示的版本号；发布时与 git tag 同步，只改这一处。</summary>
-        public const string AppVersion = "v1.6.5";
+        // ---- 版本号：**只改这一处** ----
+        // 设置页右上角的 chip、exe 文件属性（右键 → 详细信息）都以它为准。
+        // 改这里的同时要改下面 Program.cs 顶部的 AssemblyVersion/AssemblyFileVersion
+        // —— 那两个是编译期常量，不能引用运行时字符串。tools/precheck 会核对两者是否一致。
+        public const string AppVersion = "v1.6.6";
 
         /// <summary>圆角矩形路径。调用方负责 Dispose。</summary>
         public static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -6237,47 +6257,9 @@ namespace EyeLite
         private float dpiScale = 1f;
 
         // 与 RestForm 同义：px 是设计基准下的像素，k 是屏幕占比系数
-        // ---- 与遮罩/跟练同一套：布局按屏幕占比，不按 DPI ----
-        private const int DesignW = 1920;
-        private const int DesignH = 1080;
-        private float k = 1f;
-        private Dictionary<int, Font> fontCache;
-
-        private static float CalcK()
-        {
-            try
-            {
-                Rectangle b = Screen.PrimaryScreen.Bounds;
-                float dpi = Ui.Scale <= 0f ? 1f : Ui.Scale;
-                float kx = (b.Width / dpi) / (float)DesignW;
-                float ky = (b.Height / dpi) / (float)DesignH;
-                float v = kx < ky ? kx : ky;
-                if (v < 0.5f) v = 0.5f;
-                if (v > 4f) v = 4f;
-                return v;
-            }
-            catch { return 1f; }
-        }
-
-        private Font F(float basePt)
-        {
-            if (fontCache == null) fontCache = new Dictionary<int, Font>();
-            int key = (int)(basePt * 10);
-            Font f;
-            if (fontCache.TryGetValue(key, out f)) return f;
-            float dpi = Ui.Scale <= 0f ? 1f : Ui.Scale;
-            float pt = basePt * k / dpi;
-            if (pt < 4f) pt = 4f;
-            if (pt > 96f) pt = 96f;
-            try { f = new Font("微软雅黑", pt, FontStyle.Regular); }
-            catch { f = SystemFonts.DefaultFont; }
-            fontCache[key] = f;
-            return f;
-        }
-
         private int Sc(int px)
         {
-            return (int)(px * k + 0.5f);   // 不用 Math.Round：避免银行家舍入的 ±1px 抖动
+            return (int)(px * dpiScale + 0.5f);   // 不用 Math.Round：避免银行家舍入的 ±1px 抖动
         }
 
         public SettingsForm(AppConfig cfg)
@@ -6289,7 +6271,7 @@ namespace EyeLite
             // 再小上下两行的圆角容器会贴在一起（v1.6.1 那根"柱子"就是这么来的）。
             int numTextH = Ui.TextH(Ui.FontNumInput);
             int labelTextH = Ui.TextH(Ui.FontRowLabel);
-            rowH = numTextH + Sc(6);
+            rowH = numTextH + Sc(5);   // 留白 5：4K@150% 下正好让整页落在可装高度内（6 会多出 21px）
             checkH = labelTextH + Sc(10);
             if (rowH < Sc(28)) rowH = Sc(28);      // 兜底：算不出字高时退回一个能看的行高
             if (checkH < rowH) checkH = rowH;      // 复选行不比数值行矮
@@ -6321,6 +6303,20 @@ namespace EyeLite
 
             int clientW = Sc(FormW);
             int clientH = EstimateFormH();
+            try
+            {
+                string tf = Environment.GetEnvironmentVariable("EYE_LITE_TRACE_LAYOUT");
+                if (tf != null && tf.Length > 0)
+                {
+                    System.IO.File.AppendAllText(tf,
+                        "dpi=" + dpiScale + " rowH=" + rowH + " checkH=" + checkH
+                        + " firstRowTop=" + firstRowTop
+                        + " h1..h5=" + h1 + "," + h2 + "," + h3 + "," + h4 + "," + h5
+                        + " clientW=" + clientW + " clientH=" + clientH
+                        + " textH=" + Ui.TextH(Ui.FontNumInput) + Environment.NewLine);
+                }
+            }
+            catch { }
             int maxH;
             try
             {
@@ -6370,10 +6366,14 @@ namespace EyeLite
 
             // 右侧版本号：包进一个浅色 chip，与标题同一视觉行。
             // chip 右缘仍贴 Sc(CardLeft) + Sc(CardWidth)，label 在 chip 内右对齐、左右各留 Sc(8)。
+            //
+            // **宽度必须按实际文本量**：原来是固定 Sc(64)，"v1.6.6" 比 "v1.6.1" 多一点，
+            // 被裁成 "v1.6" —— 用户看到的就是"不知道自己是哪个版本"。
+            // 版本号以后会一直涨（v1.6.10 更长），写死宽度必然再次裁字。
             RoundPanel chipVersion = new RoundPanel(Sc(8),
                                                     Color.FromArgb(0xEE, 0xF2, 0xF8),
                                                     Color.FromArgb(0xE3, 0xE9, 0xF2));
-            int chipW = Sc(64);
+            int chipW = TextRenderer.MeasureText(Ui.AppVersion, Ui.FontEyebrow).Width + Sc(18);
             int chipH = Sc(22);
             // 原 label 在 Sc(52) 处高 Sc(18)，中心 61；chip 高 22，上移 2px 保持同一视觉行
             chipVersion.SetBounds(Sc(CardLeft) + Sc(CardWidth) - chipW, Sc(50), chipW, chipH);
